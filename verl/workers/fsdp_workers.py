@@ -45,6 +45,48 @@ from codetiming import Timer
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'WARN'))
 
+import threading
+import subprocess
+import time
+import csv
+import os
+
+class GPUMonitor:
+    def __init__(self, log_path, interval=0.1):
+        self.log_path = log_path
+        self.interval = interval
+        self.running = False
+        self.thread = None
+
+    def _gpu_logger(self):
+        with open(self.log_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Time(ms)", "GPU Utilization(%)", "Memory Utilization(%)", "Memory Used(MiB)", "Memory Total(MiB)"])
+            start_time = time.time()
+            while self.running:
+                result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    gpu_stats = result.stdout.strip().split('\n')[0].split(',')
+                    timestamp = int((time.time() - start_time) * 1000)
+                    writer.writerow([timestamp] + [s.strip() for s in gpu_stats])
+                time.sleep(self.interval)
+
+    def start(self):
+        if os.path.exists(self.log_path):
+            os.remove(self.log_path)
+        self.running = True
+        self.thread = threading.Thread(target=self._gpu_logger, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.thread is not None:
+            self.thread.join()
+
 
 def create_device_mesh(world_size, fsdp_size):
     if fsdp_size < 0 or fsdp_size >= world_size:
@@ -457,6 +499,10 @@ class ActorRolloutRefWorker(Worker):
 
         log_gpu_memory_usage('Before update policy', logger=logger)
 
+        log_path = f"/drive/MyDrive/gpu/gpu_training_log_rank{self.rank}.csv"
+        gpu_monitor = GPUMonitor(log_path=log_path)
+        gpu_monitor.start()
+
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
             # perform training
@@ -482,6 +528,8 @@ class ActorRolloutRefWorker(Worker):
 
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
             output = output.to('cpu')
+
+        gpu_monitor.stop()
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
@@ -519,7 +567,16 @@ class ActorRolloutRefWorker(Worker):
             log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
 
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+
+            log_path = f"/drive/MyDrive/gpu/gpu_sampling_log_rank{self.rank}.csv"
+            gpu_monitor = GPUMonitor(log_path=log_path)
+            gpu_monitor.start()
+            print("Started logging the sampling")
+
             output = self.rollout.generate_sequences(prompts=prompts)
+
+            gpu_monitor.stop()
+
             log_gpu_memory_usage('After rollout generation', logger=logger)
 
             output = self.rollout_sharding_manager.postprocess_data(output)
