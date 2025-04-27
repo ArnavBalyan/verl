@@ -250,7 +250,7 @@ class vLLMRollout(BaseRollout):
         t0 = time.time()
         with self.update_sampling_params(**kwargs):
             t1 = time.time()
-            augmented_vllm_inputs = vllm_inputs + vllm_inputs
+            augmented_vllm_inputs = vllm_inputs + vllm_inputs + vllm_inputs + vllm_inputs + vllm_inputs
             outputs = self.inference_engine.generate(
                 prompts=augmented_vllm_inputs,
                 sampling_params=self.sampling_params,
