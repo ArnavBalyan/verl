@@ -43,6 +43,7 @@ import torch.distributed
 from torch.nn.utils.rnn import pad_sequence
 from sglang.srt.utils import broadcast_pyobj, get_ip
 from sglang.srt.server_args import PortArgs, ServerArgs
+import time
 
 if TYPE_CHECKING:
     from torch import nn
@@ -209,26 +210,27 @@ class SGLangRollout(BaseRollout):
         for key, value in old_sampling_params_args.items():
             self.sampling_params[key] = value
 
+
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
-        # if self.config.free_cache_engine:
+        start_total = time.time()
 
+        t0 = time.time()
         idx = prompts.batch["input_ids"]  # (bs, prompt_length)
-        # left-padded attention_mask
         attention_mask = prompts.batch["attention_mask"]
         position_ids = prompts.batch["position_ids"]
-
-        # used to construct attention_mask
         eos_token_id = prompts.meta_info["eos_token_id"]
-
         batch_size = idx.size(0)
+        print(f"[Timing][SGLang] Extracted input tensors in {time.time() - t0:.4f} seconds")
 
-        # Extract non-tensor data
+        t0 = time.time()
         non_tensor_batch = prompts.non_tensor_batch
         if 'raw_prompt_ids' not in non_tensor_batch:
             non_tensor_batch['raw_prompt_ids'] = np.array(
                 [_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
+        print(f"[Timing][SGLang] Pre-processed raw_prompt_ids in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         if 'multi_modal_data' in non_tensor_batch:
             sglang_inputs = []
             for raw_prompt_ids, multi_modal_data in zip(non_tensor_batch.pop('raw_prompt_ids'),
@@ -242,19 +244,23 @@ class SGLangRollout(BaseRollout):
             sglang_inputs = [{
                 'prompt_token_ids': raw_prompt_ids
             } for raw_prompt_ids in non_tensor_batch.pop('raw_prompt_ids')]
+        print(f"[Timing][SGLang] Prepared sglang_inputs in {time.time() - t0:.4f} seconds")
 
-        # Ensure token IDs are lists
+        t0 = time.time()
         for input_data in sglang_inputs:
             if isinstance(input_data['prompt_token_ids'], np.ndarray):
                 input_data['prompt_token_ids'] = input_data['prompt_token_ids'].tolist()
             elif not isinstance(input_data['prompt_token_ids'], list):
                 raise TypeError(
                     f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}")
+        print(f"[Timing][SGLang] Converted prompt_token_ids to list in {time.time() - t0:.4f} seconds")
 
-        # Extract token IDs and image data for SGLang Engine
+        t0 = time.time()
         idx_list = [input_data['prompt_token_ids'] for input_data in sglang_inputs]
         image_list = [input_data.get('image_data', None) for input_data in sglang_inputs]
+        print(f"[Timing][SGLang] Extracted idx_list and image_list in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         do_sample = prompts.meta_info.get("do_sample", True)
         if not do_sample:
             kwargs = dict(
@@ -271,25 +277,33 @@ class SGLangRollout(BaseRollout):
                 skip_special_tokens=True,
                 spaces_between_special_tokens=True,
             )
-        # users can customize different sampling_params at different run
+        print(f"[Timing][SGLang] Processed sampling kwargs in {time.time() - t0:.4f} seconds")
+
+        t0 = time.time()
         with self.update_sampling_params(**kwargs):
             print(f"{self.sampling_params=}")
+            t1 = time.time()
             output = self.inference_engine.generate(
-                prompt=None,  # because we have already convert it to prompt token id
+                prompt=None,
                 sampling_params=self.sampling_params,
                 return_logprob=True,
                 input_ids=idx_list,
                 image_data=image_list)
+            print(f"[Timing][SGLang] Inference engine generation done in {time.time() - t1:.4f} seconds")
 
+        t0 = time.time()
         out = _post_process_outputs(self.tokenizer, output)
+        print(f"[Timing][SGLang] Post-processed outputs in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         response = out[0].to(idx.device)
         # log_probs = out[1].to(idx.device)
-
         if response.shape[1] < self.config.response_length:
             response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
-            # log_probs = pad_sequence_to_length(log_probs, self.config.response_length, self.pad_token_id)
+        print(f"[Timing][SGLang] Processed response tensor in {time.time() - t0:.4f} seconds")
+
         if self.config.n > 1 and do_sample:
+            t0 = time.time()
             idx = idx.repeat_interleave(self.config.n, dim=0)
             attention_mask = attention_mask.repeat_interleave(self.config.n, dim=0)
             position_ids = position_ids.repeat_interleave(self.config.n, dim=0)
@@ -298,39 +312,43 @@ class SGLangRollout(BaseRollout):
                 non_tensor_batch['multi_modal_inputs'] = np.repeat(non_tensor_batch['multi_modal_inputs'],
                                                                    self.config.n,
                                                                    axis=0)
-        seq = torch.cat([idx, response], dim=-1)
+            print(f"[Timing][SGLang] Repeated inputs for sampling n > 1 in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
+        seq = torch.cat([idx, response], dim=-1)
+        print(f"[Timing][SGLang] Concatenated prompts and responses in {time.time() - t0:.4f} seconds")
+
+        t0 = time.time()
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
         delta_position_id = delta_position_id.unsqueeze(0).repeat(batch_size, 1)
 
-        # TODO(sgm): fix position_ids on right_pad
-        # prompt: left pad + response: right pad
-        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
-        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
         response_position_ids = position_ids[:, -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         response_attention_mask = get_response_mask(response_id=response,
                                                     eos_token=eos_token_id,
                                                     dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+        print(f"[Timing][SGLang] Updated attention and position ids in {time.time() - t0:.4f} seconds")
 
-        # all the tp ranks should contain the same data here. data in all ranks are valid
+        t0 = time.time()
         batch = TensorDict(
             {
                 "prompts": idx,
                 "responses": response,
-                "input_ids": seq,  # here input_ids become the whole sentences
-                # 'old_log_probs': log_probs, # we will recompute old log prob with actor
+                "input_ids": seq,
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
             },
             batch_size=batch_size,
         )
+        print(f"[Timing][SGLang] Created output TensorDict in {time.time() - t0:.4f} seconds")
 
-        # free cache engine
+        t0 = time.time()
         if (self.config.free_cache_engine and self.inference_engine._engine is not None and
                 self.inference_engine._engine.tokenizer_manager is not None):
             self.inference_engine._engine.tokenizer_manager.flush_cache()
+            print(f"[Timing][SGLang] Flushed cache in {time.time() - t0:.4f} seconds")
 
+        print(f"[Timing][SGLang] Total time for generate_sequences: {time.time() - start_total:.4f} seconds")
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
