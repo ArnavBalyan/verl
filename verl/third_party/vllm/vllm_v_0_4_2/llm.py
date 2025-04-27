@@ -181,6 +181,7 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             completions in the same order as the input prompts.
         """
+        print("Generate 0_4_2")
         start_total = time.time()
 
         t0 = time.time()
