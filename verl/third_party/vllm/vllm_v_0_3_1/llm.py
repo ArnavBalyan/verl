@@ -28,7 +28,7 @@ from vllm.utils import Counter
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from verl.workers.rollout.tokenizer import HybridEngineBaseTokenizer
-
+import time
 
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
@@ -172,31 +172,43 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             completions in the same order as the input prompts.
         """
+        start_total = time.time()
+
+        t0 = time.time()
         if prompts is None and prompt_token_ids is None:
-            raise ValueError("Either prompts or prompt_token_ids must be "
-                             "provided.")
+            raise ValueError("Either prompts or prompt_token_ids must be provided.")
         if isinstance(prompts, str):
-            # Convert a single prompt to a list.
             prompts = [prompts]
         if prompts is not None and prompt_token_ids is not None:
             if len(prompts) != len(prompt_token_ids):
-                raise ValueError("The lengths of prompts and prompt_token_ids "
-                                 "must be the same.")
-        if sampling_params is None:
-            # Use default sampling params.
-            sampling_params = SamplingParams()
+                raise ValueError("The lengths of prompts and prompt_token_ids must be the same.")
+        print(f"[Timing][VLLM-Generate] Checked inputs and normalized prompts in {time.time() - t0:.4f} seconds")
 
-        # Add requests to the engine.
+        t0 = time.time()
+        if sampling_params is None:
+            sampling_params = SamplingParams()
+        print(f"[Timing][VLLM-Generate] Loaded sampling parameters in {time.time() - t0:.4f} seconds")
+
+        t0 = time.time()
         num_requests = len(prompts) if prompts is not None else len(prompt_token_ids)
+        print(f"[Timing][VLLM-Generate] Prepared to add {num_requests} requests in {time.time() - t0:.4f} seconds")
+
+        t_add = time.time()
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             prefix_pos_i = prefix_pos[i] if prefix_pos is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[i]
             if not isinstance(token_ids, list):
-                # NOTE(shengguangming): convert the rollout input into List[str]
                 token_ids = self._pre_process_inputs(token_ids)
             self._add_request(prompt, sampling_params, token_ids, lora_request=lora_request, prefix_pos=prefix_pos_i)
-        return self._run_engine(use_tqdm)
+        print(f"[Timing][VLLM-Generate] Added all requests in {time.time() - t_add:.4f} seconds")
+
+        t0 = time.time()
+        result = self._run_engine(use_tqdm)
+        print(f"[Timing][VLLM-Generate] Ran engine and generated outputs in {time.time() - t0:.4f} seconds")
+
+        print(f"[Timing][VLLM-Generate] Total time for generate: {time.time() - start_total:.4f} seconds")
+        return result
 
     def _add_request(
         self,
