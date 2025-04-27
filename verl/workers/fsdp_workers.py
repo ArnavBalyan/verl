@@ -22,6 +22,8 @@ import psutil
 
 import torch
 import torch.distributed
+from torch.profiler import profile, record_function, ProfilerActivity
+
 from torch.distributed.device_mesh import init_device_mesh
 import verl.utils.torch_functional as verl_F
 from omegaconf import DictConfig, open_dict
@@ -44,6 +46,50 @@ from codetiming import Timer
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv('VERL_PPO_LOGGING_LEVEL', 'WARN'))
+
+import threading
+import subprocess
+import time
+import csv
+import os
+from datetime import datetime
+import random
+
+class GPUMonitor:
+    def __init__(self, log_path, interval=0.1):
+        self.log_path = log_path
+        self.interval = interval
+        self.running = False
+        self.thread = None
+
+    def _gpu_logger(self):
+        with open(self.log_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Time(ms)", "GPU Utilization(%)", "Memory Utilization(%)", "Memory Used(MiB)", "Memory Total(MiB)"])
+            start_time = time.time()
+            while self.running:
+                result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    gpu_stats = result.stdout.strip().split('\n')[0].split(',')
+                    timestamp = int((time.time() - start_time) * 1000)
+                    writer.writerow([timestamp] + [s.strip() for s in gpu_stats])
+                time.sleep(self.interval)
+
+    def start(self):
+        if os.path.exists(self.log_path):
+            os.remove(self.log_path)
+        self.running = True
+        self.thread = threading.Thread(target=self._gpu_logger, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.thread is not None:
+            self.thread.join()
 
 
 def create_device_mesh(world_size, fsdp_size):
@@ -447,7 +493,10 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
         # Support all hardwares
+        t0 = time.time()
         data = data.to(torch.cuda.current_device())
+        t1 = time.time()
+        print(f"[Timing] Moved data to GPU {t1 - t0:.4f} seconds")
 
         assert self._is_actor
         if self._is_offload_param:
@@ -456,12 +505,20 @@ class ActorRolloutRefWorker(Worker):
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
 
         log_gpu_memory_usage('Before update policy', logger=logger)
+        sfx = datetime.now().strftime('%Y%m%d_%H%M%S') + f"_{random.randint(1000, 9999)}"
+        log_path = f"/root/gpu_training_log_rank{self.rank}_{sfx}.csv"
+        gpu_monitor = GPUMonitor(log_path=log_path)
+        gpu_monitor.start()
 
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
-            # perform training
+
+            tx = time.time()
             with Timer(name='update_policy', logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
+            t4 = time.time()
+            print(f"[Timing] update_policy took {t4 - tx:.4f} seconds")
+
             delta_time = timer.last
             global_num_tokens = data.meta_info['global_token_num']
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
@@ -481,7 +538,13 @@ class ActorRolloutRefWorker(Worker):
             output = DataProto(meta_info={'metrics': metrics})
 
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
+
+            t7 = time.time()
             output = output.to('cpu')
+            t8 = time.time()
+            print(f"[Timing] Moved to CPU {t8 - t7:.4f} seconds")
+
+        gpu_monitor.stop()
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
@@ -493,7 +556,10 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
+        t0 = time.time()
         prompts = prompts.to(torch.cuda.current_device())
+        t1 = time.time()
+        print(f"[Timing] Moved prompts to GPU {t1 - t0:.4f} seconds")
 
         assert self._is_rollout
         if self._is_offload_param:
@@ -518,13 +584,30 @@ class ActorRolloutRefWorker(Worker):
 
             log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
 
+            t2 = time.time()
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+            t3 = time.time()
+            print(f"[Timing] Preprocessing {t3 - t2:.4f} seconds")
+            sfx = datetime.now().strftime('%Y%m%d_%H%M%S') + f"_{random.randint(1000, 9999)}"
+            log_path = f"/root/gpu_sampling_log_rank{self.rank}_{sfx}.csv"
+            gpu_monitor = GPUMonitor(log_path=log_path)
+            gpu_monitor.start()
+
+            t4 = time.time()
             output = self.rollout.generate_sequences(prompts=prompts)
+            t5 = time.time()
+            print(f"[Timing] Sequence generation {t5 - t4:.4f} seconds")
+
+            gpu_monitor.stop()
+
             log_gpu_memory_usage('After rollout generation', logger=logger)
 
             output = self.rollout_sharding_manager.postprocess_data(output)
 
+        t8 = time.time()
         output = output.to('cpu')
+        t9 = time.time()
+        print(f"[Timing] Moved to CPU {t9 - t8:.4f} seconds")
 
         # clear kv cache
         log_gpu_memory_usage('After generate_sequences', logger=logger)
