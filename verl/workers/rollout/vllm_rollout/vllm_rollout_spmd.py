@@ -243,6 +243,9 @@ class vLLMRollout(BaseRollout):
                 'n': 1,
             }
         print(f"[Timing][VLLM] Processed sampling kwargs in {time.time() - t0:.4f} seconds")
+        print(f"[DEBUG] self.inference_engine = {type(self.inference_engine)}")
+        print(
+            f"[DEBUG] self.inference_engine.generate = {self.inference_engine.generate.__module__}.{self.inference_engine.generate.__qualname__}")
 
         t0 = time.time()
         with self.update_sampling_params(**kwargs):
