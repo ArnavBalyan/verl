@@ -180,6 +180,7 @@ class SeqAllToAll(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor, None, None]:
+        print("ulysses backpropagation kicking in")
         if ctx.async_op:
             input_t = torch.cat(grad_output[1:], dim=ctx.gather_dim).contiguous()
         else:
@@ -224,6 +225,7 @@ class Gather(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, grad_output: Tensor) -> Any:
+        print("ulysses backward kicking in")
         if ctx.grad_scaler:
             grad_output = grad_output * ctx.sp_world_size
         return (None, grad_output.split(ctx.part_size,

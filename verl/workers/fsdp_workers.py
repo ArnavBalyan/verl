@@ -22,6 +22,8 @@ import psutil
 
 import torch
 import torch.distributed
+from torch.profiler import profile, record_function, ProfilerActivity
+
 from torch.distributed.device_mesh import init_device_mesh
 import verl.utils.torch_functional as verl_F
 from omegaconf import DictConfig, open_dict
@@ -50,6 +52,8 @@ import subprocess
 import time
 import csv
 import os
+from datetime import datetime
+import random
 
 class GPUMonitor:
     def __init__(self, log_path, interval=0.1):
@@ -489,7 +493,10 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def update_actor(self, data: DataProto):
         # Support all hardwares
+        t0 = time.time()
         data = data.to(torch.cuda.current_device())
+        t1 = time.time()
+        print(f"[Timing] Moved data to GPU in {t1 - t0:.4f} seconds")
 
         assert self._is_actor
         if self._is_offload_param:
@@ -498,16 +505,34 @@ class ActorRolloutRefWorker(Worker):
             load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
 
         log_gpu_memory_usage('Before update policy', logger=logger)
+        unique_suffix = datetime.now().strftime('%Y%m%d_%H%M%S') + f"_{random.randint(1000, 9999)}"
 
-        log_path = f"/drive/MyDrive/gpu/gpu_training_log_rank{self.rank}.csv"
+        log_path = f"/root/gpu_training_log_rank{self.rank}_{unique_suffix}.csv"
         gpu_monitor = GPUMonitor(log_path=log_path)
         gpu_monitor.start()
 
         with self.ulysses_sharding_manager:
+            t2 = time.time()
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
+            t3 = time.time()
+            print(f"[Timing] Preprocessing took {t3 - t2:.4f} seconds")
+
             # perform training
-            with Timer(name='update_policy', logger=None) as timer:
-                metrics = self.actor.update_policy(data=data)
+            with profile(
+                    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler('./log/actor_profile'),
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=True
+            ) as prof:
+                tx = time.time()
+                with Timer(name='update_policy', logger=None) as timer:
+                    metrics = self.actor.update_policy(data=data)
+                t4 = time.time()
+                print(f"[Timing] update_policy took {t4 - tx:.4f} seconds")
+
+                prof.step()
+
             delta_time = timer.last
             global_num_tokens = data.meta_info['global_token_num']
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
@@ -524,10 +549,16 @@ class ActorRolloutRefWorker(Worker):
             log_gpu_memory_usage('After update policy', logger=logger)
 
             # TODO: here, we should return all metrics
+            t5 = time.time()
             output = DataProto(meta_info={'metrics': metrics})
-
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
+            t6 = time.time()
+            print(f"[Timing] Postprocessing took {t6 - t5:.4f} seconds")
+
+            t7 = time.time()
             output = output.to('cpu')
+            t8 = time.time()
+            print(f"[Timing] Moved output to CPU in {t8 - t7:.4f} seconds")
 
         gpu_monitor.stop()
 
@@ -541,7 +572,10 @@ class ActorRolloutRefWorker(Worker):
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         # Support all hardwares
+        t0 = time.time()
         prompts = prompts.to(torch.cuda.current_device())
+        t1 = time.time()
+        print(f"[Timing] Moved prompts to GPU in {t1 - t0:.4f} seconds")
 
         assert self._is_rollout
         if self._is_offload_param:
@@ -566,22 +600,35 @@ class ActorRolloutRefWorker(Worker):
 
             log_gpu_memory_usage('After entering rollout sharding manager', logger=logger)
 
+            t2 = time.time()
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
+            t3 = time.time()
+            print(f"[Timing] Preprocessing took {t3 - t2:.4f} seconds")
+            unique_suffix = datetime.now().strftime('%Y%m%d_%H%M%S') + f"_{random.randint(1000, 9999)}"
 
-            log_path = f"/drive/MyDrive/gpu/gpu_sampling_log_rank{self.rank}.csv"
+            log_path = f"/root/gpu_sampling_log_rank{self.rank}_{unique_suffix}.csv"
             gpu_monitor = GPUMonitor(log_path=log_path)
             gpu_monitor.start()
             print("Started logging the sampling")
 
+            t4 = time.time()
             output = self.rollout.generate_sequences(prompts=prompts)
+            t5 = time.time()
+            print(f"[Timing] Sequence generation took {t5 - t4:.4f} seconds")
 
             gpu_monitor.stop()
 
             log_gpu_memory_usage('After rollout generation', logger=logger)
 
+            t6 = time.time()
             output = self.rollout_sharding_manager.postprocess_data(output)
+            t7 = time.time()
+            print(f"[Timing] Postprocessing took {t7 - t6:.4f} seconds")
 
+        t8 = time.time()
         output = output.to('cpu')
+        t9 = time.time()
+        print(f"[Timing] Moved output to CPU in {t9 - t8:.4f} seconds")
 
         # clear kv cache
         log_gpu_memory_usage('After generate_sequences', logger=logger)
@@ -594,7 +641,11 @@ class ActorRolloutRefWorker(Worker):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
         # Support all hardwares
+        t0 = time.time()
         data = data.to(torch.cuda.current_device())
+        t1 = time.time()
+        print(f"[Timing] Moved data to GPU in {t1 - t0:.4f} seconds")
+
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info['micro_batch_size'] = self.config.rollout.log_prob_micro_batch_size_per_gpu
         data.meta_info['max_token_len'] = self.config.rollout.log_prob_max_token_len_per_gpu
@@ -602,16 +653,30 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info['temperature'] = self.config.rollout.temperature
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
+            t2 = time.time()
             data = self.ulysses_sharding_manager.preprocess_data(data)
+            t3 = time.time()
+            print(f"[Timing] Preprocessing took {t3 - t2:.4f} seconds")
+
+            t4 = time.time()
             output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+            t5 = time.time()
+            print(f"[Timing] Log prob + entropy computation took {t5 - t4:.4f} seconds")
+
+            t6 = time.time()
             output = DataProto.from_dict(tensors={
                 'old_log_probs': output,
                 'entropys': entropys
             },
                                          meta_info={'temperature': self.config.rollout.temperature})
             output = self.ulysses_sharding_manager.postprocess_data(output)
+            t7 = time.time()
+            print(f"[Timing] Postprocessing took {t7 - t6:.4f} seconds")
 
+        t8 = time.time()
         output = output.to('cpu')
+        t9 = time.time()
+        print(f"[Timing] Moved output to CPU in {t9 - t8:.4f} seconds")
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
@@ -629,7 +694,10 @@ class ActorRolloutRefWorker(Worker):
         assert self._is_ref
 
         # Support all hardwares
+        t0 = time.time()
         data = data.to(torch.cuda.current_device())
+        t1 = time.time()
+        print(f"[Timing] Moved data to GPU in {t1 - t0:.4f} seconds")
 
         micro_batch_size = self.config.ref.log_prob_micro_batch_size_per_gpu
         data.meta_info['micro_batch_size'] = micro_batch_size
@@ -637,12 +705,26 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info['max_token_len'] = self.config.ref.log_prob_max_token_len_per_gpu
         data.meta_info['use_dynamic_bsz'] = self.config.ref.log_prob_use_dynamic_bsz
         with self.ulysses_sharding_manager:
+            t2 = time.time()
             data = self.ulysses_sharding_manager.preprocess_data(data)
+            t3 = time.time()
+            print(f"[Timing] Preprocessing took {t3 - t2:.4f} seconds")
+
+            t4 = time.time()
             output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            t5 = time.time()
+            print(f"[Timing] Log prob computation took {t5 - t4:.4f} seconds")
+
+            t6 = time.time()
             output = DataProto.from_dict(tensors={'ref_log_prob': output})
             output = self.ulysses_sharding_manager.postprocess_data(output)
+            t7 = time.time()
+            print(f"[Timing] Postprocessing took {t7 - t6:.4f} seconds")
 
+        t8 = time.time()
         output = output.to('cpu')
+        t9 = time.time()
+        print(f"[Timing] Moved output to CPU in {t9 - t8:.4f} seconds")
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module

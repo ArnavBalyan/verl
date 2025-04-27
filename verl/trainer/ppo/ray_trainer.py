@@ -28,6 +28,7 @@ from copy import deepcopy
 from collections import defaultdict
 from functools import partial
 from tqdm import tqdm
+import time
 
 import ray
 import numpy as np
@@ -889,7 +890,9 @@ class RayPPOTrainer(object):
 
                     # recompute old_log_probs
                     with _timer('old_log_prob', timing_raw):
+                        start = time.time()
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        print(f"old_log_prob took {time.time() - start:.4f} seconds")
                         entropys = old_log_prob.batch['entropys']
                         response_masks = batch.batch['response_mask']
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -904,13 +907,17 @@ class RayPPOTrainer(object):
                     if self.use_reference_policy:
                         # compute reference log_prob
                         with _timer('ref', timing_raw):
+                            start = time.time()
                             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
+                            print(f"ref_log_prob took {time.time() - start:.4f} seconds")
                             batch = batch.union(ref_log_prob)
 
                     # compute values
                     if self.use_critic:
                         with _timer('values', timing_raw):
+                            start = time.time()
                             values = self.critic_wg.compute_values(batch)
+                            print(f"compute_values took {time.time() - start:.4f} seconds")
                             batch = batch.union(values)
 
                     with _timer('adv', timing_raw):
@@ -919,7 +926,10 @@ class RayPPOTrainer(object):
                         # the results from reward model and rule-based results.
                         if self.use_rm:
                             # we first compute reward model score
+                            start = time.time()
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
+                            print(f"compute_rm_scope took {time.time() - start:.4f} seconds")
+
                             batch = batch.union(reward_tensor)
 
                         # we combine with rule-based rm
@@ -958,7 +968,9 @@ class RayPPOTrainer(object):
                     # update critic
                     if self.use_critic:
                         with _timer('update_critic', timing_raw):
+                            start = time.time()
                             critic_output = self.critic_wg.update_critic(batch)
+                            print(f"update_critic took {time.time() - start:.4f} seconds")
                         critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
                         metrics.update(critic_output_metrics)
 
@@ -966,7 +978,9 @@ class RayPPOTrainer(object):
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
                         with _timer('update_actor', timing_raw):
+                            start = time.time()
                             actor_output = self.actor_rollout_wg.update_actor(batch)
+                            print(f"update_actor took {time.time() - start:.4f} seconds")
                         actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                         metrics.update(actor_output_metrics)
 
@@ -974,7 +988,9 @@ class RayPPOTrainer(object):
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and \
                         (is_last_step or  self.global_steps % self.config.trainer.test_freq == 0):
                         with _timer('testing', timing_raw):
+                            start = time.time()
                             val_metrics: dict = self._validate()
+                            print(f"validate took {time.time() - start:.4f} seconds")
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)

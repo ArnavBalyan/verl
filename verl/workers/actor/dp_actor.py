@@ -30,6 +30,7 @@ from verl.utils.torch_functional import logprobs_from_logits, masked_mean
 from verl.utils.ulysses import ulysses_pad_and_slice_inputs, gather_outpus_and_unpad
 from verl.utils.seqlen_balancing import rearrange_micro_batches, get_reverse_idx
 import verl.utils.torch_functional as verl_F
+import time
 
 from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
 
@@ -291,11 +292,18 @@ class DataParallelPPOActor(BasePPOActor):
                 self.actor_optimizer.zero_grad()
 
                 for data in micro_batches:
+                    time_start_total = time.time()
+                    time_start = time.time()
+
                     # Support all hardwares
                     if isinstance(data, DataProto):
                         data = {**data.batch.to(torch.cuda.current_device()), **data.non_tensor_batch}
                     else:
                         data = data.to(torch.cuda.current_device())  # actor device is cpu when using offload
+
+                    time_transfer = time.time() - time_start
+                    print(f"[Timer] data.to(device): {time_transfer:.5f}s")
+
                     responses = data['responses']
                     response_length = responses.size(1)
                     attention_mask = data['attention_mask']
@@ -314,10 +322,16 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
+
+                    time_start = time.time()
                     entropy, log_prob = self._forward_micro_batch(micro_batch=data,
                                                                   temperature=temperature,
                                                                   calculate_entropy=calculate_entropy)
 
+                    time_forward = time.time() - time_start
+                    print(f"[Timer] Forward pass: {time_forward:.5f}s")
+
+                    time_start = time.time()
                     pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
                         old_log_prob=old_log_prob,
                         log_prob=log_prob,
@@ -350,13 +364,20 @@ class DataParallelPPOActor(BasePPOActor):
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         metrics['actor/kl_loss'] = kl_loss.detach().item()
                         metrics['actor/kl_coef'] = self.config.kl_loss_coef
+                    time_loss = time.time() - time_start
+                    print(f"[Timer] Loss computation: {time_loss:.5f}s")
 
+                    time_start = time.time()
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
                         loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
                     else:
                         loss = policy_loss / self.gradient_accumulation
                     loss.backward()
+                    time_backward = time.time() - time_start
+                    print(f"[Timer] Backward pass: {time_backward:.5f}s")
+                    total_step_time = time.time() - time_start_total
+                    print(f"[Timer] Total microbatch step: {total_step_time:.4f}s\n")
 
                     data = {
                         'actor/pg_loss': pg_loss.detach().item(),
@@ -365,9 +386,13 @@ class DataParallelPPOActor(BasePPOActor):
                         'actor/pg_clipfrac_lower': pg_clipfrac_lower.detach().item(),
                     }
                     append_to_dict(metrics, data)
+                time_start = time.time()
 
                 grad_norm = self._optimizer_step()
                 data = {'actor/grad_norm': grad_norm.detach().item()}
+                time_step = time.time() - time_start
+                print(f"[Timer] Optimizer step: {time_step:.5f}s")
+
             append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
         return metrics
