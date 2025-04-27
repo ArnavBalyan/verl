@@ -22,6 +22,7 @@ import torch.distributed
 from tensordict import TensorDict
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+import time
 
 from verl import DataProto
 from verl.utils.torch_functional import get_response_mask
@@ -40,11 +41,29 @@ class HFRollout(BaseRollout):
         self.module = module
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
+        start_total = time.time()
+
+        t0 = time.time()
         batch_size = prompts.batch.batch_size[0]
+        print(f"[Timing][Chunked] Read batch size in {time.time() - t0:.4f} seconds")
+
+        t0 = time.time()
         num_chunks = max(batch_size // self.config.get('micro_batch_size', batch_size), 1)
+        print(f"[Timing][Chunked] Calculated num_chunks={num_chunks} in {time.time() - t0:.4f} seconds")
+
+        t0 = time.time()
         batch_prompts = prompts.chunk(chunks=num_chunks)
+        print(f"[Timing][Chunked] Split prompts into chunks in {time.time() - t0:.4f} seconds")
+
+        t0 = time.time()
         output = [self._generate_minibatch(p) for p in batch_prompts]
+        print(f"[Timing][Chunked] Ran minibatch generation in {time.time() - t0:.4f} seconds")
+
+        t0 = time.time()
         output = DataProto.concat(output)
+        print(f"[Timing][Chunked] Concatenated minibatch outputs in {time.time() - t0:.4f} seconds")
+
+        print(f"[Timing][Chunked] Total time for generate_sequences: {time.time() - start_total:.4f} seconds")
         return output
 
     @torch.no_grad()

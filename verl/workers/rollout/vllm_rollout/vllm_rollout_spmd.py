@@ -39,6 +39,7 @@ from verl.workers.rollout.base import BaseRollout
 from vllm.distributed import parallel_state as vllm_ps
 from vllm import LLM, SamplingParams
 from verl.third_party.vllm import vllm_version
+import time
 
 # TODO
 # 1. support pp in vllm
@@ -176,28 +177,32 @@ class vLLMRollout(BaseRollout):
 
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
-        # rebuild vllm cache engine
-        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
-            self.inference_engine.init_cache_engine()
+        start_total = time.time()
 
-        idx = prompts.batch['input_ids']  # (bs, prompt_length)
-        # left-padded attention_mask
+        if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
+            t0 = time.time()
+            self.inference_engine.init_cache_engine()
+            print(f"[Timing][VLLM11] Cache engine initialized in {time.time() - t0:.4f} seconds")
+
+        t0 = time.time()
+        idx = prompts.batch['input_ids']
         attention_mask = prompts.batch['attention_mask']
         position_ids = prompts.batch['position_ids']
-
-        # used to construct attention_mask
         eos_token_id = prompts.meta_info['eos_token_id']
-
         batch_size = idx.size(0)
+        print(f"[Timing][VLLM] Extracted input tensors in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         non_tensor_batch = prompts.non_tensor_batch
         if 'raw_prompt_ids' not in non_tensor_batch:
             non_tensor_batch['raw_prompt_ids'] = np.array(
                 [_pre_process_inputs(self.pad_token_id, idx[i]) for i in range(batch_size)], dtype=object)
+        print(f"[Timing][VLLM] Pre-processed raw_prompt_ids in {time.time() - t0:.4f} seconds")
 
         if batch_size != len(non_tensor_batch['raw_prompt_ids']):
             raise RuntimeError('vllm sharding manager is not work properly.')
 
+        t0 = time.time()
         if 'multi_modal_data' in non_tensor_batch:
             vllm_inputs = []
             for raw_prompt_ids, multi_modal_data in zip(non_tensor_batch.pop('raw_prompt_ids'),
@@ -207,16 +212,18 @@ class vLLMRollout(BaseRollout):
             vllm_inputs = [{
                 'prompt_token_ids': raw_prompt_ids
             } for raw_prompt_ids in non_tensor_batch.pop('raw_prompt_ids')]
+        print(f"[Timing][VLLM] Prepared vllm_inputs in {time.time() - t0:.4f} seconds")
 
-        # ensure the type of `prompt_token_ids` passed to vllm is list[int]
-        # https://github.com/volcengine/verl/pull/772
+        t0 = time.time()
         for input_data in vllm_inputs:
             if isinstance(input_data['prompt_token_ids'], np.ndarray):
                 input_data['prompt_token_ids'] = input_data['prompt_token_ids'].tolist()
             elif not isinstance(input_data['prompt_token_ids'], list):
                 raise TypeError(
                     f"prompt_token_ids must be a list or numpy array, got {type(input_data['prompt_token_ids'])}")
+        print(f"[Timing][VLLM] Converted prompt_token_ids to list in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         do_sample = prompts.meta_info.get('do_sample', True)
         is_validate = prompts.meta_info.get('validate', False)
         if not do_sample:
@@ -226,27 +233,27 @@ class vLLMRollout(BaseRollout):
                 'top_k': -1,
                 'min_p': 0.0,
                 'temperature': 0,
-                'n': 1  # if greedy, only 1 response
+                'n': 1
             }
         elif is_validate:
-            # TODO: try **
             kwargs = {
                 'top_k': self.config.val_kwargs.top_k,
                 'top_p': self.config.val_kwargs.top_p,
                 'temperature': self.config.val_kwargs.temperature,
-                'n': 1,  # if validate, already repeat in ray_trainer
+                'n': 1,
             }
+        print(f"[Timing][VLLM] Processed sampling kwargs in {time.time() - t0:.4f} seconds")
 
-        # users can customize different sampling_params at different run
+        t0 = time.time()
         with self.update_sampling_params(**kwargs):
+            t1 = time.time()
             outputs = self.inference_engine.generate(
-                prompts=vllm_inputs,  # because we have already convert it to prompt token id
+                prompts=vllm_inputs,
                 sampling_params=self.sampling_params,
                 use_tqdm=False)
+            print(f"[Timing][VLLM] Inference engine generation done in {time.time() - t1:.4f} seconds")
 
-            # TODO(sgm): disable logprob when recompute_log_prob is enable
-            # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
-
+            t1 = time.time()
             response = []
             for output in outputs:
                 for sample_id in range(len(output.outputs)):
@@ -254,8 +261,10 @@ class vLLMRollout(BaseRollout):
 
             response = pad_2d_list_to_length(response, self.pad_token_id,
                                              max_length=self.config.response_length).to(idx.device)
+            print(f"[Timing][VLLM] Collated and padded responses in {time.time() - t1:.4f} seconds")
 
             if self.sampling_params.n > 1 and do_sample:
+                t2 = time.time()
                 idx = _repeat_interleave(idx, self.sampling_params.n)
                 attention_mask = _repeat_interleave(attention_mask, self.sampling_params.n)
                 position_ids = _repeat_interleave(position_ids, self.sampling_params.n)
@@ -263,40 +272,43 @@ class vLLMRollout(BaseRollout):
                 if 'multi_modal_inputs' in non_tensor_batch.keys():
                     non_tensor_batch['multi_modal_inputs'] = _repeat_interleave(non_tensor_batch['multi_modal_inputs'],
                                                                                 self.sampling_params.n)
+                print(f"[Timing][VLLM] Repeated inputs for sampling n > 1 in {time.time() - t2:.4f} seconds")
 
+            t2 = time.time()
             seq = torch.cat([idx, response], dim=-1)
+            print(f"[Timing][VLLM] Concatenated prompts and responses in {time.time() - t2:.4f} seconds")
 
+        t0 = time.time()
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
         delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
-        if position_ids.dim() == 3:  # qwen2vl mrope
+        if position_ids.dim() == 3:
             delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
 
-        # TODO(sgm): fix position_ids on right_pad
-        # prompt: left pad + response: right pad
-        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
-        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
         response_position_ids = position_ids[..., -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         response_attention_mask = get_response_mask(response_id=response,
                                                     eos_token=eos_token_id,
                                                     dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+        print(f"[Timing][VLLM1] Updated attention and position ids in {time.time() - t0:.4f} seconds")
 
-        # all the tp ranks should contain the same data here. data in all ranks are valid
+        t0 = time.time()
         batch = TensorDict(
             {
                 'prompts': idx,
                 'responses': response,
-                'input_ids': seq,  # here input_ids become the whole sentences
-                # 'old_log_probs': log_probs, # we will recompute old log prob with actor
+                'input_ids': seq,
                 'attention_mask': attention_mask,
                 'position_ids': position_ids
             },
             batch_size=batch_size)
+        print(f"[Timing][VLLM] Created output TensorDict in {time.time() - t0:.4f} seconds")
 
-        # free vllm cache engine
+        t0 = time.time()
         if vllm_version in ('0.3.1', '0.4.2', '0.5.4', '0.6.3') and self.config.free_cache_engine:
             self.inference_engine.free_cache_engine()
+            print(f"[Timing][VLLM] Cache engine freed in {time.time() - t0:.4f} seconds")
 
+        print(f"[Timing][VLLM] Total time for generate_sequences: {time.time() - start_total:.4f} seconds")
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)

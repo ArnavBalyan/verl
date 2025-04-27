@@ -31,6 +31,7 @@ import torch
 import torch.distributed
 from tensordict import TensorDict
 from torch import nn
+import time
 
 from verl import DataProto
 from verl.utils.torch_functional import get_response_mask, pad_sequence_to_length
@@ -111,25 +112,28 @@ class FIREvLLMRollout(vLLMRollout):
 
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
-        # rebuild vllm cache engine
-        if self.config.free_cache_engine:
-            self.inference_engine.init_cache_engine()
+        start_total = time.time()
 
-        idx = prompts.batch['input_ids']  # (bs, prompt_length)
-        # left-padded attention_mask
+        if self.config.free_cache_engine:
+            t0 = time.time()
+            self.inference_engine.init_cache_engine()
+            print(f"[Timing][VLLM-FIRE] Cache engine initialized in {time.time() - t0:.4f} seconds")
+
+        t0 = time.time()
+        idx = prompts.batch['input_ids']
         attention_mask = prompts.batch['attention_mask']
         position_ids = prompts.batch['position_ids']
-
-        # used to construct attention_mask
         eos_token_id = prompts.meta_info['eos_token_id']
-
         batch_size = idx.size(0)
+        print(f"[Timing][VLLM-FIRE] Extracted input tensors and meta info in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         idx_list = []
-        # parse idx from torch.Tensor to List[List[str]]
         for i in range(batch_size):
             idx_list.append(_pre_process_inputs(self.pad_token_id, idx[i]))
+        print(f"[Timing][VLLM-FIRE] Pre-processed input ids into list format in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         do_sample = prompts.meta_info.get('do_sample', True)
         if not do_sample:
             kwargs = {
@@ -138,79 +142,95 @@ class FIREvLLMRollout(vLLMRollout):
                 'top_k': -1,
                 'min_p': 0.0,
                 'temperature': 0,
-                'n': 1  # if greedy, only 1 response
+                'n': 1
             }
+        print(f"[Timing][VLLM-FIRE] Processed sampling kwargs in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         if not self.use_fire_sampling:
-            # users can customize different sampling_params at different run
             with self.update_sampling_params(**kwargs):
+                t1 = time.time()
                 output = self.inference_engine.generate(
-                    prompts=None,  # because we have already convert it to prompt token id
+                    prompts=None,
                     sampling_params=self.sampling_params,
                     prompt_token_ids=idx_list,
                     use_tqdm=False)
+                print(f"[Timing][VLLM-FIRE] Inference without fire sampling done in {time.time() - t1:.4f} seconds")
 
-            response = output[0].to(idx.device)  # (bs, response_length)
-            log_probs = output[1].to(idx.device)  # (bs, response_length)
+            response = output[0].to(idx.device)
+            log_probs = output[1].to(idx.device)
         else:
             with self.update_sampling_params(**kwargs):
+                t1 = time.time()
                 output_0 = self.inference_engine.generate(
-                    prompts=None,  # because we have already convert it to prompt token id
+                    prompts=None,
                     sampling_params=self.sampling_params_0,
                     prompt_token_ids=idx_list,
                     use_tqdm=False)
+                print(f"[Timing][VLLM-FIRE] First stage fire sampling done in {time.time() - t1:.4f} seconds")
+
+                t2 = time.time()
                 new_idx_list = []
                 for i in range(batch_size):
                     new_idx_list.append(idx_list[i] + output_0[0][i].tolist())
+                print(f"[Timing][VLLM-FIRE] Built new idx_list after stage 0 outputs in {time.time() - t2:.4f} seconds")
+
+                t3 = time.time()
                 output = self.inference_engine.generate(
-                    prompts=None,  # because we have already convert it to prompt token id
+                    prompts=None,
                     sampling_params=self.sampling_params,
                     prompt_token_ids=new_idx_list,
                     use_tqdm=False)
+                print(f"[Timing][VLLM-FIRE] Second stage fire sampling done in {time.time() - t3:.4f} seconds")
 
-            response = torch.cat([output_0[0], output[0]], dim=1).to(idx.device)  # (bs, response_length)
-            # log_probs = torch.cat([output_0[1], output[1]], dim=1).to(idx.device)  # (bs, response_length)
+            response = torch.cat([output_0[0], output[0]], dim=1).to(idx.device)
 
+        t0 = time.time()
         if response.shape[1] < self.config.response_length:
             response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
-            # log_probs = pad_sequence_to_length(log_probs, self.config.response_length, self.pad_token_id)
+        print(f"[Timing][VLLM-FIRE] Padded response to target length in {time.time() - t0:.4f} seconds")
 
         if self.config.n > 1 and do_sample:
+            t0 = time.time()
             idx = idx.repeat_interleave(self.config.n, dim=0)
             attention_mask = attention_mask.repeat_interleave(self.config.n, dim=0)
             position_ids = position_ids.repeat_interleave(self.config.n, dim=0)
             batch_size = batch_size * self.config.n
-        seq = torch.cat([idx, response], dim=-1)
+            print(f"[Timing][VLLM-FIRE] Repeated inputs for sampling n > 1 in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
+        seq = torch.cat([idx, response], dim=-1)
+        print(f"[Timing][VLLM-FIRE] Concatenated prompts and responses in {time.time() - t0:.4f} seconds")
+
+        t0 = time.time()
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
         delta_position_id = delta_position_id.unsqueeze(0).repeat(batch_size, 1)
 
-        # TODO(sgm): fix position_ids on right_pad
-        # prompt: left pad + response: right pad
-        # attention_mask: [0,0,0,0,1,1,1,1, | 1,1,1,0,0,0,0,0]
-        # position_ids:   [0,0,0,0,0,1,2,3, | 4,5,6,7,8,9,10,11]
         response_position_ids = position_ids[:, -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         response_attention_mask = get_response_mask(response_id=response,
                                                     eos_token=eos_token_id,
                                                     dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+        print(f"[Timing][VLLM-FIRE] Updated attention and position ids in {time.time() - t0:.4f} seconds")
 
-        # all the tp ranks should contain the same data here. data in all ranks are valid
+        t0 = time.time()
         batch = TensorDict(
             {
                 'prompts': idx,
                 'responses': response,
-                'input_ids': seq,  # here input_ids become the whole sentences
-                # 'old_log_probs': log_probs, # we will recompute old log prob with actor
+                'input_ids': seq,
                 'attention_mask': attention_mask,
                 'position_ids': position_ids
             },
             batch_size=batch_size)
+        print(f"[Timing][VLLM-FIRE] Created output TensorDict in {time.time() - t0:.4f} seconds")
 
-        # free vllm cache engine
         if self.config.free_cache_engine:
+            t0 = time.time()
             self.inference_engine.free_cache_engine()
+            print(f"[Timing][VLLM-FIRE] Cache engine freed in {time.time() - t0:.4f} seconds")
 
+        print(f"[Timing][VLLM-FIRE] Total time for generate_sequences: {time.time() - start_total:.4f} seconds")
         return DataProto(batch=batch)
