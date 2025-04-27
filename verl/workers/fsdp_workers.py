@@ -598,7 +598,7 @@ class ActorRolloutRefWorker(Worker):
             log_path = f"/root/gpu_sampling_log_rank{self.rank}_{unique_suffix}.csv"
             gpu_monitor = GPUMonitor(log_path=log_path)
             gpu_monitor.start()
-            print("Started logging the sampling")
+            print("Started logging the sampling11")
 
             t4 = time.time()
             output = self.rollout.generate_sequences(prompts=prompts)
