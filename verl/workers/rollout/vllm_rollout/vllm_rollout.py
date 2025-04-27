@@ -32,6 +32,7 @@ import torch
 import torch.distributed
 from tensordict import TensorDict
 from torch import nn
+import time
 
 from verl import DataProto
 from verl.utils.torch_functional import get_response_mask, pad_sequence_to_length
@@ -163,9 +164,14 @@ class vLLMRollout(BaseRollout):
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
         # rebuild vllm cache engine
+        start_total = time.time()
+        print("[Timing] Generating sequences... from VLLM Rollout")
         if self.config.free_cache_engine:
+            t0 = time.time()
             self.inference_engine.init_cache_engine()
+            print(f"[Timing] Cache engine initialized in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         idx = prompts.batch['input_ids']  # (bs, prompt_length)
         # left-padded attention_mask
         attention_mask = prompts.batch['attention_mask']
@@ -175,12 +181,16 @@ class vLLMRollout(BaseRollout):
         eos_token_id = prompts.meta_info['eos_token_id']
 
         batch_size = idx.size(0)
+        print(f"[Timing] Extracted input tensors in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         idx_list = []
         # parse idx from torch.Tensor to List[List[str]]
         for i in range(batch_size):
             idx_list.append(_pre_process_inputs(self.pad_token_id, idx[i]))
+        print(f"[Timing] Pre-processed input_ids to list in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         do_sample = prompts.meta_info.get('do_sample', True)
         is_validate = prompts.meta_info.get('validate', False)
         if not do_sample:
@@ -200,14 +210,18 @@ class vLLMRollout(BaseRollout):
                 'temperature': self.config.val_kwargs.temperature,
                 'n': 1,  # if validate, already repeat in ray_trainer
             }
+        print(f"[Timing] Processed kwargs for sampling in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
+            t1 = time.time()
             output = self.inference_engine.generate(
                 prompts=None,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
                 prompt_token_ids=idx_list,
                 use_tqdm=False)
+            print(f"[Timing] Inference generation done in {time.time() - t1:.4f} seconds")
 
             # TODO(sgm): disable logprob when recompute_log_prob is enable
             # if n = 1: (bs, response_length) ; if n > 1: (bs * n, response_length)
@@ -215,17 +229,25 @@ class vLLMRollout(BaseRollout):
             # log_probs = output[1].to(idx.device)
 
             if response.shape[1] < self.config.response_length:
+                t2 = time.time()
                 response = pad_sequence_to_length(response, self.config.response_length, self.pad_token_id)
+                print(f"[Timing] Padded response to target length in {time.time() - t2:.4f} seconds")
                 # log_probs = pad_sequence_to_length(log_probs, self.config.response_length, self.pad_token_id)
 
             # utilize current sampling params
             if self.sampling_params.n > 1 and do_sample:
+                t3 = time.time()
                 idx = idx.repeat_interleave(self.sampling_params.n, dim=0)
                 attention_mask = attention_mask.repeat_interleave(self.sampling_params.n, dim=0)
                 position_ids = position_ids.repeat_interleave(self.sampling_params.n, dim=0)
                 batch_size = batch_size * self.sampling_params.n
-            seq = torch.cat([idx, response], dim=-1)
+                print(f"[Timing] Repeated inputs for sampling n > 1 in {time.time() - t3:.4f} seconds")
 
+            t4 = time.time()
+            seq = torch.cat([idx, response], dim=-1)
+            print(f"[Timing] Concatenated prompts and responses in {time.time() - t4:.4f} seconds")
+
+        t0 = time.time()
         response_length = response.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
         delta_position_id = delta_position_id.unsqueeze(0).repeat(batch_size, 1)
@@ -240,7 +262,9 @@ class vLLMRollout(BaseRollout):
                                                     eos_token=eos_token_id,
                                                     dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
+        print(f"[Timing] Updated attention and position ids in {time.time() - t0:.4f} seconds")
 
+        t0 = time.time()
         # all the tp ranks should contain the same data here. data in all ranks are valid
         batch = TensorDict(
             {
@@ -252,9 +276,13 @@ class vLLMRollout(BaseRollout):
                 'position_ids': position_ids
             },
             batch_size=batch_size)
+        print(f"[Timing] Created output TensorDict in {time.time() - t0:.4f} seconds")
 
         # free vllm cache engine
         if self.config.free_cache_engine:
+            t0 = time.time()
             self.inference_engine.free_cache_engine()
+            print(f"[Timing] Freed cache engine in {time.time() - t0:.4f} seconds")
 
+        print(f"[Timing] Total time for generate_sequences: {time.time() - start_total:.4f} seconds")
         return DataProto(batch=batch)

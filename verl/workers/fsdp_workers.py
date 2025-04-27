@@ -564,7 +564,7 @@ class ActorRolloutRefWorker(Worker):
         t0 = time.time()
         prompts = prompts.to(torch.cuda.current_device())
         t1 = time.time()
-        print(f"[Timing] Moved prompts to GPU in {t1 - t0:.4f} seconds")
+            print(f"[Timing] Moved prompts to GPU in {t1 - t0:.4f} seconds")
 
         assert self._is_rollout
         if self._is_offload_param:
