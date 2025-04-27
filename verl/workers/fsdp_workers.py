@@ -517,22 +517,11 @@ class ActorRolloutRefWorker(Worker):
             t3 = time.time()
             print(f"[Timing] Preprocessing took {t3 - t2:.4f} seconds")
 
-            # perform training
-            with profile(
-                    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                    on_trace_ready=torch.profiler.tensorboard_trace_handler('./log/actor_profile'),
-                    record_shapes=True,
-                    profile_memory=True,
-                    with_stack=True
-            ) as prof:
-                tx = time.time()
-                with Timer(name='update_policy', logger=None) as timer:
-                    metrics = self.actor.update_policy(data=data)
-                t4 = time.time()
-                print(f"[Timing] update_policy took {t4 - tx:.4f} seconds")
-
-                prof.step()
-
+            tx = time.time()
+            with Timer(name='update_policy', logger=None) as timer:
+                metrics = self.actor.update_policy(data=data)
+            t4 = time.time()
+            print(f"[Timing] update_policy took {t4 - tx:.4f} seconds")
             delta_time = timer.last
             global_num_tokens = data.meta_info['global_token_num']
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
