@@ -302,7 +302,7 @@ class DataParallelPPOActor(BasePPOActor):
                         data = data.to(torch.cuda.current_device())  # actor device is cpu when using offload
 
                     time_transfer = time.time() - time_start
-                    print(f"[Timer] data.to(device): {time_transfer:.5f}s")
+                    # print(f"[Timer] data.to(device): {time_transfer:.5f}s")
 
                     responses = data['responses']
                     response_length = responses.size(1)
@@ -329,7 +329,7 @@ class DataParallelPPOActor(BasePPOActor):
                                                                   calculate_entropy=calculate_entropy)
 
                     time_forward = time.time() - time_start
-                    print(f"[Timer] Forward pass: {time_forward:.5f}s")
+                    # print(f"[Timer] Forward pass: {time_forward:.5f}s")
 
                     time_start = time.time()
                     pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
@@ -365,7 +365,7 @@ class DataParallelPPOActor(BasePPOActor):
                         metrics['actor/kl_loss'] = kl_loss.detach().item()
                         metrics['actor/kl_coef'] = self.config.kl_loss_coef
                     time_loss = time.time() - time_start
-                    print(f"[Timer] Loss computation: {time_loss:.5f}s")
+                    # print(f"[Timer] Loss computation: {time_loss:.5f}s")
 
                     time_start = time.time()
                     if self.config.use_dynamic_bsz:
@@ -375,9 +375,9 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss / self.gradient_accumulation
                     loss.backward()
                     time_backward = time.time() - time_start
-                    print(f"[Timer] Backward pass: {time_backward:.5f}s")
+                    # print(f"[Timer] Backward pass: {time_backward:.5f}s")
                     total_step_time = time.time() - time_start_total
-                    print(f"[Timer] Total microbatch step: {total_step_time:.4f}s\n")
+                    # print(f"[Timer] Total microbatch step: {total_step_time:.4f}s\n")
 
                     data = {
                         'actor/pg_loss': pg_loss.detach().item(),
@@ -391,7 +391,7 @@ class DataParallelPPOActor(BasePPOActor):
                 grad_norm = self._optimizer_step()
                 data = {'actor/grad_norm': grad_norm.detach().item()}
                 time_step = time.time() - time_start
-                print(f"[Timer] Optimizer step: {time_step:.5f}s")
+                # print(f"[Timer] Optimizer step: {time_step:.5f}s")
 
             append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
