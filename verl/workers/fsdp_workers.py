@@ -56,7 +56,7 @@ from datetime import datetime
 import random
 
 class GPUMonitor:
-    def __init__(self, log_path, interval=0.1):
+    def __init__(self, log_path, interval=0.2):
         self.log_path = log_path
         self.interval = interval
         self.running = False
