@@ -251,10 +251,16 @@ class vLLMRollout(BaseRollout):
         with self.update_sampling_params(**kwargs):
             t1 = time.time()
             augmented_vllm_inputs = vllm_inputs + vllm_inputs + vllm_inputs + vllm_inputs + vllm_inputs
+
+            torch.cuda.cudart().cudaProfilerStart()
+
             outputs = self.inference_engine.generate(
                 prompts=augmented_vllm_inputs,
                 sampling_params=self.sampling_params,
                 use_tqdm=False)
+
+            torch.cuda.cudart().cudaProfilerStop()
+
             print(f"[Timing][VLLM] Inference engine generation done in {time.time() - t1:.4f} seconds")
             outputs = outputs[:len(vllm_inputs)]
 
