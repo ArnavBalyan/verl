@@ -252,6 +252,7 @@ class vLLMRollout(BaseRollout):
             t1 = time.time()
             augmented_vllm_inputs = vllm_inputs + vllm_inputs + vllm_inputs + vllm_inputs + vllm_inputs
 
+            print("=== START PROFILER ===")
             torch.cuda.cudart().cudaProfilerStart()
 
             outputs = self.inference_engine.generate(
@@ -260,6 +261,7 @@ class vLLMRollout(BaseRollout):
                 use_tqdm=False)
 
             torch.cuda.cudart().cudaProfilerStop()
+            print("=== END PROFILER ===")
 
             print(f"[Timing][VLLM] Inference engine generation done in {time.time() - t1:.4f} seconds")
             outputs = outputs[:len(vllm_inputs)]
