@@ -115,12 +115,15 @@ class vLLMRollout(BaseRollout):
             limit_mm_per_prompt = {"image": config.get('limit_images')}
 
         # copy it to avoid secretly modifying the engine config
-        engine_kwargs = {} if "engine_kwargs" not in config else OmegaConf.to_container(deepcopy(config.engine_kwargs))
+        # engine_kwargs = {} if "engine_kwargs" not in config else OmegaConf.to_container(deepcopy(config.engine_kwargs))
         # For each vLLM engine parameter,
         # - `None` means not setting it, so we pop it, and leave it to vLLM default value
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
+        # engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        engine_kwargs = {} if "engine_kwargs" not in config else OmegaConf.to_container(deepcopy(config.engine_kwargs))
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        engine_kwargs["seed"] = 42
 
         self.inference_engine = LLM(
             model=model_path,
@@ -141,7 +144,7 @@ class vLLMRollout(BaseRollout):
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
-            seed=config.get('seed', 0),
+            # seed=config.get('seed', 0),
             **engine_kwargs
         )
 
