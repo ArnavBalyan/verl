@@ -40,6 +40,7 @@ from vllm.distributed import parallel_state as vllm_ps
 from vllm import LLM, SamplingParams
 from verl.third_party.vllm import vllm_version
 import time
+from copy import deepcopy
 
 # TODO
 # 1. support pp in vllm
