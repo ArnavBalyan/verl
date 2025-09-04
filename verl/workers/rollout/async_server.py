@@ -387,6 +387,34 @@ class AsyncLLMServerManager:
         """Sleep all vllm instances."""
         ray.get([server.sleep.remote() for server in self.async_llm_servers])
 
+    # ------------------------------------------------------------------
+    # Compatibility helpers so AsyncLLMServerManager can act like a normal
+    # RayWorkerGroup when training code queries `.world_size`.
+    # ------------------------------------------------------------------
+
+    @property
+    def world_size(self):
+        """Number of rollout workers managed by this async server."""
+        return getattr(self.worker_group, "world_size", 1)
+
+    # ------------------------------------------------------------------
+    # Delegate API used by trainers so that this manager can stand in for
+    # a RayWorkerGroup (which already implements these calls).
+    # ------------------------------------------------------------------
+
+    def compute_log_prob(self, data):
+        """Forward compute_log_prob to the underlying worker group."""
+        return self.worker_group.compute_log_prob(data)
+
+    def update_actor(self, data):
+        """Forward update_actor to the underlying worker group."""
+        return self.worker_group.update_actor(data)
+
+    def save_checkpoint(self, *args, **kwargs):
+        """No checkpointing supported for AsyncLLMServerManager - passing through."""
+        print("AsyncLLMServerManager: No checkpointing supported - passing through")
+        return None
+
     def submit_chat_completions(
         self,
         callback: Callable[[ChatCompletion, Dict[str, Any], Exception], None],
