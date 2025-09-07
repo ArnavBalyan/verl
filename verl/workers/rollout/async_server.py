@@ -314,6 +314,10 @@ class AsyncLLMServerManager:
 
         self.rollout_tp_size = self.config.rollout.tensor_model_parallel_size
         self.rollout_dp_size = self.worker_group.world_size // self.rollout_tp_size
+        print(f"🔍 ASYNC_SERVER DEBUG: worker_group.world_size = {self.worker_group.world_size}")
+        print(f"🔍 ASYNC_SERVER DEBUG: rollout_tp_size = {self.rollout_tp_size}")
+        print(f"🔍 ASYNC_SERVER DEBUG: rollout_dp_size = {self.rollout_dp_size}")
+        print(f"🔍 ASYNC_SERVER DEBUG: Will create {self.rollout_dp_size} vLLM servers")
 
         register_center = ray.get_actor(f"{self.worker_group.name_prefix}_register_center")
         workers_info = ray.get(register_center.get_worker_info.remote())

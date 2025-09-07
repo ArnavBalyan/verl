@@ -238,7 +238,15 @@ class AsyncvLLMServer(AsyncServerBase):
         generator = await self.openai_serving_chat.create_chat_completion(request, raw_request)
 
         if isinstance(generator, ErrorResponse):
-            return JSONResponse(content=generator.model_dump(), status_code=generator.code)
+            # Return actual error payload and status code
+            try:
+                payload = generator.model_dump()
+            except Exception:
+                # Fallback to string if pydantic model_dump fails
+                payload = {"error": str(generator)}
+            status_code = getattr(generator, "status_code", 500)
+            logging.error(f"vLLM ChatCompletion Error: status={status_code} payload={payload}")
+            return JSONResponse(content=payload, status_code=status_code)
         if request.stream:
             return StreamingResponse(content=generator, media_type="text/event-stream")
         else:
@@ -255,7 +263,14 @@ class AsyncvLLMServer(AsyncServerBase):
         generator = await self.openai_serving_completion.create_completion(request, raw_request)
 
         if isinstance(generator, ErrorResponse):
-            return JSONResponse(content=generator.model_dump(), status_code=generator.code)
+            # Return actual error payload and status code
+            try:
+                payload = generator.model_dump()
+            except Exception:
+                payload = {"error": str(generator)}
+            status_code = getattr(generator, "status_code", 500)
+            logging.error(f"vLLM Completion Error: status={status_code} payload={payload}")
+            return JSONResponse(content=payload, status_code=status_code)
         if request.stream:
             return StreamingResponse(content=generator, media_type="text/event-stream")
         else:
@@ -277,8 +292,14 @@ class AsyncvLLMServer(AsyncServerBase):
         """
         generator = await self.openai_serving_chat.create_chat_completion(request)
         if isinstance(generator, ErrorResponse):
-            data = generator.model_dump_json(exclude_unset=True)
-            yield generator.code, f"data: {data}\n\n"
+            # Yield actual error payload and status code in stream
+            try:
+                data = generator.model_dump_json(exclude_unset=True)
+            except Exception:
+                data = str(generator)
+            status_code = getattr(generator, "status_code", 500)
+            logging.error(f"vLLM ChatCompletion Stream Error: status={status_code} payload={data}")
+            yield status_code, f"data: {data}\n\n"
 
         if request.stream:
             async for chunk in generator:
@@ -295,3 +316,5 @@ class AsyncvLLMServer(AsyncServerBase):
         # TODO: https://github.com/vllm-project/vllm/issues/17103
         await self.engine.reset_prefix_cache()
         await self.engine.sleep()
+
+        # Duplicate error-handling block removed (accidental paste caused bad indent)

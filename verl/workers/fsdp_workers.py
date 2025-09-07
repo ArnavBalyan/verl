@@ -119,6 +119,19 @@ class ActorRolloutRefWorker(Worker):
         if not torch.distributed.is_initialized():
             rank = int(os.environ.get("RANK", 0))
             world_size = int(os.environ.get("WORLD_SIZE", 1))
+            # import logging, os
+            # debug_keys = [
+            #     "NCCL_P2P_DISABLE",
+            #     "NCCL_IGNORE_DISABLED_P2P",
+            #     "NCCL_P2P_LEVEL",
+            #     "NCCL_DEBUG",
+            #     "NCCL_IB_DISABLE",
+            # ]
+            # logging.info(
+            #     "[FSDP init] Rank %s NCCL env: %s",
+            #     os.environ.get("RANK", "?"),
+            #     {k: os.environ.get(k) for k in debug_keys},
+            # )
             torch.distributed.init_process_group(backend="cpu:gloo,cuda:nccl" if is_cuda_available else "cpu:gloo,npu:hccl", rank=rank, world_size=world_size)
 
         # build device mesh for FSDP
@@ -330,7 +343,7 @@ class ActorRolloutRefWorker(Worker):
                 device_id=get_torch_device().current_device(),
                 sharding_strategy=sharding_strategy,  # zero3
                 mixed_precision=mixed_precision,
-                sync_module_states=True,
+                sync_module_states=False,
                 device_mesh=self.device_mesh,
                 forward_prefetch=False,
             )
@@ -1248,7 +1261,7 @@ class CriticWorker(Worker):
                 device_id=get_torch_device().current_device(),
                 sharding_strategy=sharding_strategy,
                 mixed_precision=mixed_precision,
-                sync_module_states=True,
+                sync_module_states=False,
                 forward_prefetch=False,
                 device_mesh=self.device_mesh,
                 cpu_offload=None,
@@ -1517,7 +1530,7 @@ class RewardModelWorker(Worker):
                 auto_wrap_policy=auto_wrap_policy,
                 device_id=get_torch_device().current_device(),
                 sharding_strategy=sharding_strategy,  # zero3
-                sync_module_states=True,
+                sync_module_states=False,
                 cpu_offload=CPUOffload(offload_params=True),
                 forward_prefetch=False,
                 device_mesh=self.device_mesh,
