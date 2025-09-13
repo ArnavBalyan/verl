@@ -340,7 +340,7 @@ class AsyncLLMServerManager:
                         node_id=workers_info[rollout_dp_rank * self.rollout_tp_size],
                         soft=False,
                     ),
-                    name=f"async_llm_server_{rollout_dp_rank}",
+                    name=f"async_llm_server_{rollout_dp_rank}_{self.scheduler_kwargs['agent_id']}",
                 ).remote(config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix)
                 for rollout_dp_rank in unready_dp_ranks
             }
@@ -373,11 +373,13 @@ class AsyncLLMServerManager:
         module_path, class_name = self.config.rollout.chat_scheduler.rsplit(".", 1)
         module = importlib.import_module(module_path)
         scheduler_cls = getattr(module, class_name)
+        # Filter out agent_id from scheduler_kwargs since scheduler doesn't expect it
+        scheduler_init_kwargs = {k: v for k, v in self.scheduler_kwargs.items() if k != 'agent_id'}
         self.chat_scheduler = scheduler_cls(
             config=self.config.rollout,
             model_path=self.config.model.path,
             server_addresses=self.server_addresses,
-            **self.scheduler_kwargs,
+            **scheduler_init_kwargs,
         )
 
         self.chat_scheduler_ready.set()
