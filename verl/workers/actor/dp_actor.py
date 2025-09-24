@@ -336,18 +336,21 @@ class DataParallelPPOActor(BasePPOActor):
                 if len(pad_step_indices) > 0:
                     data.batch["advantages"][pad_step_indices] = 0
 
+        print(f"[DEBUG] update_policy: Selecting batch keys: {select_keys}")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         if self.config.use_dynamic_mini_batch:
             num_mini_batches = self.config.ppo_num_mini_batches
             self.config.ppo_mini_batch_size = math.ceil(data.batch.batch_size[0] / self.config.ppo_num_mini_batches)
-            print(f"Dynamic mini batch is enabled, update ppo_mini_batch_size to {self.config.ppo_mini_batch_size}")
+            print(f"[DEBUG] update_policy: Dynamic mini batch enabled, ppo_mini_batch_size: {self.config.ppo_mini_batch_size}")
         else:
             num_mini_batches = data.batch.batch_size[0] // self.config.ppo_mini_batch_size
+            print(f"[DEBUG] update_policy: Static mini batch, num_mini_batches: {num_mini_batches}, ppo_mini_batch_size: {self.config.ppo_mini_batch_size}")
 
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
+        print(f"[DEBUG] update_policy: Creating dataloader")
         if has_multi_modal_inputs:
             non_tensor_select_keys = ["multi_modal_inputs"]
             dataloader = data.select(select_keys, non_tensor_select_keys).chunk(num_mini_batches)
@@ -357,7 +360,6 @@ class DataParallelPPOActor(BasePPOActor):
         metrics = {}
         for epoch in range(self.config.ppo_epochs):
             for batch_idx, data in enumerate(dataloader):
-                # split batch into micro_batches
                 mini_batch = data
                 if has_multi_modal_inputs:
                     self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
@@ -373,7 +375,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                 self.actor_optimizer.zero_grad()
 
-                for data in micro_batches:
+                for micro_idx, data in enumerate(micro_batches):
                     # Support all hardwares
                     if isinstance(data, DataProto):
                         data = {**data.batch.to(get_torch_device().current_device()), **data.non_tensor_batch}

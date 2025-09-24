@@ -252,12 +252,9 @@ class RayPPOAsyncTrainer(RayPPOTrainer):
                         batch.meta_info['global_token_num'] = torch.sum(batch.batch['attention_mask'], dim=-1).tolist()
                         
                         # update actor
-                        start_time = time.perf_counter()
                         with Timer('update_actor', timing_raw):
                             actor_output = self.actor_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
-                        end_time = time.perf_counter()
-                        print(f"Actor update took {end_time - start_time:.2f} seconds")
                         metrics.update(actor_output_metrics)
 
                     thread.join()

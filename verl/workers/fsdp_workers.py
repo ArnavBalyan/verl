@@ -700,10 +700,8 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            log_gpu_memory_usage("After offload actor model during update_actor", logger=logger)
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-            log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
         return output
 

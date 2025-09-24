@@ -340,7 +340,8 @@ class AsyncLLMServerManager:
                         node_id=workers_info[rollout_dp_rank * self.rollout_tp_size],
                         soft=False,
                     ),
-                    name=f"async_llm_server_{rollout_dp_rank}_{self.scheduler_kwargs['agent_id']}",
+                    name=f"async_llm_server_{rollout_dp_rank}",
+                    # name=f"async_llm_server_{rollout_dp_rank}_{self.scheduler_kwargs['agent_id']}",
                 ).remote(config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix)
                 for rollout_dp_rank in unready_dp_ranks
             }

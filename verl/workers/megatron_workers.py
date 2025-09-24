@@ -435,15 +435,12 @@ class ActorRolloutRefWorker(MegatronWorker):
         log_gpu_memory_usage("After init_model finish", logger=logger)
 
     @register(dispatch_mode=Dispatch.MEGATRON_COMPUTE_PROTO)
-    @GPUMemoryLogger(role="update_actor", logger=logger)
     def update_actor(self, data: DataProto):
         assert self._is_actor
         if self._is_offload_param:
             load_megatron_model_to_gpu(self.actor_module)
-            log_gpu_memory_usage("After load actor params and grad during update_actor", logger=logger)
         if self._is_offload_optimizer:
             load_megatron_optimizer(self.actor_optimizer)
-            log_gpu_memory_usage("After load actor optimizer during update_actor", logger=logger)
         data.batch = data.batch.cuda()
 
         micro_batch_size = self.config.actor.ppo_micro_batch_size_per_gpu
@@ -462,10 +459,8 @@ class ActorRolloutRefWorker(MegatronWorker):
 
         if self._is_offload_param:
             offload_megatron_model_to_cpu(self.actor_module)
-            log_gpu_memory_usage("After offload actor params and grad during update_actor", logger=logger)
         if self._is_offload_optimizer:
             offload_megatron_optimizer(self.actor_optimizer)
-            log_gpu_memory_usage("After offload actor optimizer during update_actor", logger=logger)
 
         torch.cuda.empty_cache()
         return output
