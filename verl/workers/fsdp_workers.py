@@ -171,15 +171,23 @@ class ActorRolloutRefWorker(Worker):
             self._is_offload_param = True
 
         # normalize config
+        # normalize config
         if self._is_actor:
             self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
             self.config.actor.ppo_mini_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
             assert self.config.actor.ppo_mini_batch_size > 0, f"ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than 0 after normalization"
             # micro bsz
+            print(f"[FSDP DEBUG] BEFORE: ppo_micro_batch_size={self.config.actor.ppo_micro_batch_size}, ppo_micro_batch_size_per_gpu={self.config.actor.ppo_micro_batch_size_per_gpu}, device_mesh.size={self.device_mesh.size()}, ulysses_sp={self.ulysses_sequence_parallel_size}")
+            
             if self.config.actor.ppo_micro_batch_size is not None:
+                old_value = self.config.actor.ppo_micro_batch_size
                 self.config.actor.ppo_micro_batch_size //= self.device_mesh.size() // self.ulysses_sequence_parallel_size
+                print(f"[FSDP DEBUG] DIVIDED: ppo_micro_batch_size changed from {old_value} to {self.config.actor.ppo_micro_batch_size}")
                 self.config.actor.ppo_micro_batch_size_per_gpu = self.config.actor.ppo_micro_batch_size
+                print(f"[FSDP DEBUG] OVERWRITTEN: ppo_micro_batch_size_per_gpu set to {self.config.actor.ppo_micro_batch_size_per_gpu}")
 
+            print(f"[FSDP DEBUG] AFTER: ppo_micro_batch_size={self.config.actor.ppo_micro_batch_size}, ppo_micro_batch_size_per_gpu={self.config.actor.ppo_micro_batch_size_per_gpu}")
+            
             if self.config.actor.ppo_micro_batch_size_per_gpu is not None:
                 assert self.config.actor.ppo_mini_batch_size % self.config.actor.ppo_micro_batch_size_per_gpu == 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be divisible by ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
                 assert self.config.actor.ppo_mini_batch_size // self.config.actor.ppo_micro_batch_size_per_gpu > 0, f"normalized ppo_mini_batch_size {self.config.actor.ppo_mini_batch_size} should be larger than ppo_micro_batch_size_per_gpu {self.config.actor.ppo_micro_batch_size_per_gpu}"
@@ -343,7 +351,7 @@ class ActorRolloutRefWorker(Worker):
                 device_id=get_torch_device().current_device(),
                 sharding_strategy=sharding_strategy,  # zero3
                 mixed_precision=mixed_precision,
-                sync_module_states=False,
+                sync_module_states=True,
                 device_mesh=self.device_mesh,
                 forward_prefetch=False,
             )
@@ -1259,7 +1267,7 @@ class CriticWorker(Worker):
                 device_id=get_torch_device().current_device(),
                 sharding_strategy=sharding_strategy,
                 mixed_precision=mixed_precision,
-                sync_module_states=False,
+                sync_module_states=True,
                 forward_prefetch=False,
                 device_mesh=self.device_mesh,
                 cpu_offload=None,
@@ -1528,7 +1536,7 @@ class RewardModelWorker(Worker):
                 auto_wrap_policy=auto_wrap_policy,
                 device_id=get_torch_device().current_device(),
                 sharding_strategy=sharding_strategy,  # zero3
-                sync_module_states=False,
+                sync_module_states=True,
                 cpu_offload=CPUOffload(offload_params=True),
                 forward_prefetch=False,
                 device_mesh=self.device_mesh,

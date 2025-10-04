@@ -358,7 +358,7 @@ class RewardModelWorker(Worker):
             auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             sharding_strategy=sharding_strategy,  # zero3
-            sync_module_states=False,
+            sync_module_states=True,
             cpu_offload=CPUOffload(offload_params=True),
             forward_prefetch=False,
             device_mesh=self.device_mesh)
