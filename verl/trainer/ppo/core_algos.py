@@ -536,8 +536,16 @@ def compute_policy_loss(
         torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask)
     
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+    
+    # DIAGNOSTIC: Expose raw values for debugging
+    debug_info = {
+        "old_log_prob_mean": verl_F.masked_mean(old_log_prob, response_mask).item(),
+        "log_prob_mean": verl_F.masked_mean(log_prob, response_mask).item(),
+        "response_mask_ratio": response_mask.float().mean().item(),
+        "negative_approx_kl_mean": verl_F.masked_mean(-negative_approx_kl, response_mask).item(),
+    }
 
-    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, debug_info
 
 
 def compute_entropy_loss(logits, response_mask, loss_agg_mode: str = "token-mean"):

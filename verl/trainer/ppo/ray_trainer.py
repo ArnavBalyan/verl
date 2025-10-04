@@ -242,6 +242,12 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch:
         data.batch["response_mask"] = compute_response_mask(data)
+        print(f"🔍 compute_advantage: AUTO-CREATED response_mask (from attention_mask)")
+    else:
+        print(f"🔍 compute_advantage: USING PROVIDED response_mask (from execution engine)")
+    # DIAGNOSTIC: Check mask stats
+    mask = data.batch["response_mask"]
+    print(f"🔍 compute_advantage: mask_mean={mask.float().mean().item():.6f} shape={mask.shape} ones={mask.sum().item()}/{mask.numel()}")
     # prepare response group
     # TODO: add other ways to estimate advantages
     if adv_estimator == AdvantageEstimator.GAE:

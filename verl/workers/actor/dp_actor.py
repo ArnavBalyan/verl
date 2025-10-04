@@ -404,7 +404,7 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = True
                     entropy, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy)
 
-                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
+                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower, debug_info = compute_policy_loss(
                         old_log_prob=old_log_prob,
                         log_prob=log_prob,
                         advantages=advantages,
@@ -453,6 +453,10 @@ class DataParallelPPOActor(BasePPOActor):
                         "actor/pg_clipfrac": pg_clipfrac.detach().item(),
                         "actor/ppo_kl": ppo_kl.detach().item(),
                         "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                        "actor/debug_old_log_prob_mean": debug_info["old_log_prob_mean"],
+                        "actor/debug_log_prob_mean": debug_info["log_prob_mean"],
+                        "actor/debug_response_mask_ratio": debug_info["response_mask_ratio"],
+                        "actor/debug_negative_approx_kl_mean": debug_info["negative_approx_kl_mean"],
                     }
                     append_to_dict(metrics, data)
 
