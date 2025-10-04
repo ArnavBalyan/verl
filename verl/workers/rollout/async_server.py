@@ -333,6 +333,7 @@ class AsyncLLMServerManager:
         # Start all server instances, restart if address already in use.
         unready_dp_ranks = set(range(self.rollout_dp_size))
         while len(unready_dp_ranks) > 0:
+            agent_id = self.scheduler_kwargs.get('agent_id') if self.scheduler_kwargs else None
             servers = {
                 rollout_dp_rank: server_class.options(
                     # make sure AsyncvLLMServer colocates with its corresponding workers
@@ -340,7 +341,8 @@ class AsyncLLMServerManager:
                         node_id=workers_info[rollout_dp_rank * self.rollout_tp_size],
                         soft=False,
                     ),
-                    name=f"async_llm_server_{rollout_dp_rank}",
+                    name=f"async_llm_server_{rollout_dp_rank}_{agent_id}" if agent_id else f"async_llm_server_{rollout_dp_rank}",
+                    # name=f"async_llm_server_{rollout_dp_rank}",
                     # name=f"async_llm_server_{rollout_dp_rank}_{self.scheduler_kwargs['agent_id']}",
                 ).remote(config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix)
                 for rollout_dp_rank in unready_dp_ranks
