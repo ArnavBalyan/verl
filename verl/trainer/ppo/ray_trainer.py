@@ -569,9 +569,15 @@ class RayPPOTrainer:
             collate_fn = default_collate_fn
 
         train_batch_size = self.config.data.get('gen_batch_size', self.config.data.train_batch_size)
+        print(f"🔍 [DATALOADER CONFIG] BEFORE rejection_sample adjustment:")
+        print(f"  train_batch_size = {train_batch_size}")
+        print(f"  rejection_sample = {self.config.trainer.rejection_sample}")
+        print(f"  rejection_sample_multiplier = {self.config.trainer.rejection_sample_multiplier}")
+
         if self.config.trainer.rejection_sample:
             train_batch_size *= self.config.trainer.rejection_sample_multiplier
             train_batch_size = int(train_batch_size)
+            print(f"  AFTER rejection_sample adjustment: train_batch_size = {train_batch_size}")
 
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
@@ -923,7 +929,11 @@ class RayPPOTrainer:
             f.write(str(self.global_steps))
 
     def _load_checkpoint(self):
+        print(f"🔍 [CHECKPOINT] _load_checkpoint called:")
+        print(f"  resume_mode = {self.config.trainer.resume_mode}")
+        print(f"  default_local_dir = {self.config.trainer.default_local_dir}")
         if self.config.trainer.resume_mode == "disable":
+            print(f"  ✅ Checkpoint loading DISABLED - training from scratch")
             return 0
 
         # load from hdfs

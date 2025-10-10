@@ -53,11 +53,12 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class DataParallelPPOActor(BasePPOActor):
-    def __init__(self, config, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None):
+    def __init__(self, config, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None, tokenizer=None):
         """When optimizer is None, it is Reference Policy"""
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
+        self.tokenizer = tokenizer
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
         print(f"Actor use_remove_padding={self.use_remove_padding}")
@@ -339,7 +340,57 @@ class DataParallelPPOActor(BasePPOActor):
         print(f"[DEBUG] update_policy: Selecting batch keys: {select_keys}")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+        # 🎯 DECODE & VISUALIZE TOKENS (First 5 samples) - COMMON FOR ALL TRAINERS
 
+        # 🎯 DECODE & VISUALIZE TOKENS (First 5 samples) - COMMON FOR ALL TRAINERS
+        # if self.tokenizer is not None and batch["input_ids"].shape[0] > 0:
+            
+        #     import torch.distributed as dist
+        #     print("Dist rank was: ", dist.get_rank())
+        #     if not dist.is_initialized() or dist.get_rank() == 0:
+                
+        #         num_samples = min(1, batch["input_ids"].shape[0])
+        #         output = ""
+        #         output += f"\n{'#'*100}\n"
+        #         output += f"{'#'*100}\n"
+        #         output += f"🔍 DP_ACTOR RECEIVED - SHOWING {num_samples} SAMPLES\n"
+        #         output += f"{'#'*100}\n"
+        #         output += f"{'#'*100}\n\n"
+                
+        #         for i in range(num_samples):
+        #             ids = batch["input_ids"][i]
+        #             attn = batch["attention_mask"][i]
+        #             resp = batch["responses"][i]
+        #             advs = batch["advantages"][i]
+        #             old_lp = batch["old_log_probs"][i]
+                    
+        #             # Decode to words
+        #             words = [self.tokenizer.decode([tok], skip_special_tokens=False) for tok in ids]
+        #             resp_words = self.tokenizer.decode(resp[resp != self.tokenizer.pad_token_id], skip_special_tokens=False)
+                    
+        #             # Build colored output
+        #             colored_text = ""
+        #             for w, a in zip(words, attn):
+        #                 if a == 1:
+        #                     colored_text += f"\033[92m{w}\033[0m"  # Green for attended
+        #                 else:
+        #                     colored_text += f"\033[90m{w}\033[0m"  # Gray for padding
+                    
+        #             output += f"\n{'='*100}\n"
+        #             output += f"📋 SAMPLE [{i+1}/{num_samples}]\n"
+        #             output += f"{'='*100}\n"
+        #             output += f"🔍 FULL SEQUENCE (green=attended, gray=padding):\n"
+        #             output += colored_text + "\n"
+        #             output += f"\n📝 RESPONSE ONLY: {resp_words}\n"
+        #             output += f"📊 ADVANTAGES: mean={advs.mean():.15f} std={advs.std():.15f} min={advs.min():.15f} max={advs.max():.15f}\n"
+        #             output += f"📉 OLD_LOG_PROBS: mean={old_lp[old_lp!=0].mean():.15f} min={old_lp[old_lp!=0].min():.15f} max={old_lp[old_lp!=0].max():.15f}\n"
+        #             output += f"{'='*100}\n\n"
+                
+        #         output += f"{'#'*100}\n"
+        #         output += f"END OF {num_samples} SAMPLES IN DP_ACTOR\n"
+        #         output += f"{'#'*100}\n\n"
+                
+        #         print(output)
         if self.config.use_dynamic_mini_batch:
             num_mini_batches = self.config.ppo_num_mini_batches
             self.config.ppo_mini_batch_size = math.ceil(data.batch.batch_size[0] / self.config.ppo_num_mini_batches)
@@ -460,9 +511,39 @@ class DataParallelPPOActor(BasePPOActor):
                     }
                     append_to_dict(metrics, data)
 
+                # 🔍 LOG: Capture weight mean BEFORE optimizer step
+                first_param = next(self.actor_module.parameters())
+                pre_mean = first_param.data.mean().item()
+
                 grad_norm = self._optimizer_step()
+
+                # 🔍 LOG: Weight mean AFTER optimizer step
+                import traceback
+                print("🔍 CALLSTACK (update_actor):\n" + "".join(traceback.format_stack(limit=600)))
+
+                post_mean = first_param.data.mean().item()
+                print(f"🔍 FSDP UPDATE: pre_mean={pre_mean} post_mean={post_mean} Δ={post_mean-pre_mean}")
+                
+                                # 🔍 LOG: FSDP weights AFTER training - print mean of EVERY param (verbose!)
+                print("🔍 FSDP TRAINED: layer-wise means")
+                for name, param in self.actor_module.named_parameters():
+                    try:
+                        mean_val = param.data.mean().item()
+                    except Exception:
+                        mean_val = float('nan')
+                    print(f"   {name:60s} | mean={mean_val}")
+                
+                # 🔍 VERIFY: Compute global mean of ALL params after training
+                global_sum, global_cnt = 0.0, 0
+                for p in self.actor_module.parameters():
+                    global_sum += p.data.float().sum().item()
+                    global_cnt += p.numel()
+                global_mean = global_sum / global_cnt if global_cnt else 0.0
+                print(f"🔍 FSDP_GLOBAL_MEAN: {global_mean}")
+
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
+        
         self.actor_optimizer.zero_grad()
         return metrics
 

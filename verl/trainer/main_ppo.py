@@ -238,14 +238,20 @@ def create_rl_sampler(data_config, dataset):
     """
     import torch
     from torch.utils.data import RandomSampler, SequentialSampler
+    print(f"🔍 [SAMPLER CONFIG]:")
+    print(f"  data_config.shuffle = {data_config.get('shuffle', False)}")
+    print(f"  data_config.seed = {data_config.get('seed', 1)}")
+    print(f"  dataset length = {len(dataset)}")
 
     # use sampler for better ckpt resume
     if data_config.shuffle:
         train_dataloader_generator = torch.Generator()
         train_dataloader_generator.manual_seed(data_config.get("seed", 1))
         sampler = RandomSampler(data_source=dataset, generator=train_dataloader_generator)
+        print(f"  ✅ Using RandomSampler with seed={data_config.get('seed', 1)}")
     else:
         sampler = SequentialSampler(data_source=dataset)
+        print(f"  ✅ Using SequentialSampler (no shuffling)")
 
     return sampler
 

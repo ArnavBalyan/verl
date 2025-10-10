@@ -419,6 +419,11 @@ class AsyncLLMServerManager:
         """Forward update_actor to the underlying worker group."""
         return self.worker_group.update_actor(data)
 
+
+    def update_rollout_actor_module(self, new_state_dict_ref):
+        """Forward weight update to the underlying worker group (same as other methods)."""
+        return self.worker_group.update_rollout_actor_module(new_state_dict_ref)
+
     def save_checkpoint(self, *args, **kwargs):
         """No checkpointing supported for AsyncLLMServerManager - passing through."""
         print("AsyncLLMServerManager: No checkpointing supported - passing through")

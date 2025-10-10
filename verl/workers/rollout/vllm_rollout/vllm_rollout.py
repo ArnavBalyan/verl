@@ -232,6 +232,17 @@ class vLLMRollout(BaseRollout):
                 lora_requests = [LoRARequest(lora_name=f"{lora_int_id}",lora_int_id=lora_int_id,lora_path="/simon-stub-path")] * batch_size
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**kwargs):
+                        # 🔍 LOG: About to call vLLM generate with the loaded weights
+            # 🔍 LOG: vLLM weights BEFORE generation
+            model = self.inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+            print("🔍 vLLM GENERATE: layer-wise means (before inference)")
+            for name, param in model.named_parameters():
+                try:
+                    mean_val = param.data.mean().item()
+                except Exception:
+                    mean_val = float('nan')
+                print(f"   {name:60s} | mean={mean_val:+.6f}")
+            
             output = self.inference_engine.generate(
                 prompts=None,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,

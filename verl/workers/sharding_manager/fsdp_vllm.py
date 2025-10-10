@@ -117,20 +117,24 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
     @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def __enter__(self):
+        print("120 was called from fsdp vllm")    
         def __collect_lora_params()->OrderedDict:
             """
             collect lora params or full params if base model is not ready in vllm
             work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
             """
             from peft.utils.save_and_load import get_peft_model_state_dict
+            print("127 was called from fsdp vllm")
 
             lora_params = OrderedDict()
             if fsdp_version(self.module) > 0:
                 if self.layered_summon:
+                    print("131 was called from fsdp vllm")
                     if not self.base_sync_done:
                         raise ValueError("To use layered_summon, you must make sure base-model is preloaded in vllm, e.g. let rollout.load_format=safetensors")
                     lora_params = layered_summon_lora_params(self.module)
                 else:
+                    print("135 was called from fsdp vllm")
                     with FSDP.summon_full_params(self.module, writeback=False):
                         if self.base_sync_done:
                             lora_params = get_peft_model_state_dict(self.module._fsdp_wrapped_module)
@@ -148,6 +152,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                             model = model.to(orig_dev)
                     torch.cuda.empty_cache()
             else:
+                print("152 was called from fsdp vllm")
                 if self.base_sync_done:
                     lora_params = get_peft_model_state_dict(self.module._fsdp_wrapped_module)
                 else:
@@ -162,6 +167,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                     model = model.to(orig_dev)
             return lora_params
 
+        print("emptycache was called from fsdp vllm")
         # NOTE: Basically, we only need `get_torch_device().empty_cache()` before vllm wake_up and
         # after vllm sleep, since vllm has its own caching memory allocator CuMemAllocator.
         # Out of vllm scope, we should avoid empty cache to let pytorch using caching memory
@@ -191,6 +197,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             "0.6.3",
         ):
             self.inference_engine.sync_model_weights(params, load_format=load_format)
+            print("self.inference_engine.sync_model_weights was called from fsdp vllm")
             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
             del params
         else:
@@ -200,6 +207,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                 self.inference_engine.wake_up()
 
             # update model params
+            print("update params called from fsdp vllm")
             self.update_params(params, peft_config=peft_config)
             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
             del params
@@ -291,7 +299,38 @@ class FSDPVLLMShardingManager(BaseShardingManager):
 
         patch_vllm_moe_model_weight_loader(model)
         device = get_torch_device().current_device()  # used when fsdp2 set cpu_offload_policy
+        
+        # 🔍 LOG: Layer-by-layer weight statistics BEFORE loading into vLLM
+        # Only print on first DP rank to avoid log spam
+        
+        
+        # 🔍 LOG: FSDP weights BEFORE loading into vLLM
+        first_key = list(updated_params.keys())[0]
+        first_param = updated_params[first_key]
+        param_tensor = first_param.full_tensor() if isinstance(first_param, DTensor) else first_param
+        print(f"🔍 FSDP→vLLM SYNC: layer='{first_key[:40]}' mean={param_tensor.mean().item()}")
+        
         loaded_params = model.load_weights(((name, param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param) for name, param in updated_params.items()))
+        
+        # 🔍 LOG: vLLM weights AFTER loading
+        first_vllm_param = next(model.parameters())
+        print(f"🔍 vLLM LOADED: mean={first_vllm_param.data.mean().item()}")
+        src_sum, src_cnt = 0.0, 0
+        for name, p in updated_params.items():
+            t = p.full_tensor() if isinstance(p, DTensor) else p
+            src_sum += t.float().sum().item()
+            src_cnt += t.numel()
+        src_global_mean = src_sum / src_cnt if src_cnt else 0.0
+        
+        dst_sum, dst_cnt = 0.0, 0
+        for p in model.parameters():
+            dst_sum += p.float().sum().item()
+            dst_cnt += p.numel()
+        dst_global_mean = dst_sum / dst_cnt if dst_cnt else 0.0
+        
+        print(f"🔍 ALL_PARAMS_CHECK: fsdp_mean={src_global_mean} vllm_mean={dst_global_mean} diff={dst_global_mean - src_global_mean}")
+        
 
         self.base_sync_done = True
+        print(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
         logger.info(f"vLLM load weights, loaded_params: {len(loaded_params) if loaded_params else -1}")
