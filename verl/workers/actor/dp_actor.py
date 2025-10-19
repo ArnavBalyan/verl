@@ -56,6 +56,7 @@ class DataParallelPPOActor(BasePPOActor):
     def __init__(self, config, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None, tokenizer=None):
         """When optimizer is None, it is Reference Policy"""
         super().__init__(config)
+        print("Initialized self.self.actor_optimizer, module and tokenizer: ", str(actor_module), str(actor_optimizer), str(tokenizer))
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.tokenizer = tokenizer
@@ -137,6 +138,11 @@ class DataParallelPPOActor(BasePPOActor):
                 extra_args = {}
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
+                # Log inputs before forward pass
+                print(f"\n🔍 [RMPAD] Inputs to model:")
+                print(f"  input_ids_rmpad: shape={input_ids_rmpad.shape}, min={input_ids_rmpad.min().item()}, max={input_ids_rmpad.max().item()}, mean={input_ids_rmpad.float().mean().item():.2f}")
+                if position_ids_rmpad is not None:
+                    print(f"  position_ids_rmpad: shape={position_ids_rmpad.shape}, min={position_ids_rmpad.min().item()}, max={position_ids_rmpad.max().item()}, mean={position_ids_rmpad.float().mean().item():.2f}")
 
                 output = self.actor_module(
                     input_ids=input_ids_rmpad,
@@ -146,28 +152,50 @@ class DataParallelPPOActor(BasePPOActor):
                     use_cache=False,
                     **extra_args,
                 )  # prevent model thinks we are generating
+                print(f"\n🔍 [RMPAD] Model output:")
+                if hasattr(output, 'logits') and output.logits is not None:
+                    print(f"  output.logits: shape={output.logits.shape}, min={output.logits.min().item():.4f}, max={output.logits.max().item():.4f}, mean={output.logits.mean().item():.4f}")
+                if hasattr(output, 'log_probs') and output.log_probs is not None:
+                    print(f"  output.log_probs: shape={output.log_probs.shape}, min={output.log_probs.min().item():.6f}, max={output.log_probs.max().item():.6f}, mean={output.log_probs.mean().item():.6f}")
+                if hasattr(output, 'entropy') and output.entropy is not None:
+                    print(f"  output.entropy: shape={output.entropy.shape}, min={output.entropy.min().item():.6f}, max={output.entropy.max().item():.6f}, mean={output.entropy.mean().item():.6f}")
 
                 if self.use_fused_kernels:
+                    print("Using fused kernels")
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                     entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
 
                 else:
                     logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                    print(f"\n🔍 [RMPAD] logits_rmpad before temp scaling:")
+                    print(f"  shape={logits_rmpad.shape}, min={logits_rmpad.min().item():.6f}, max={logits_rmpad.max().item():.6f}, mean={logits_rmpad.mean().item():.6f}")
+                    
                     logits_rmpad.div_(temperature)
+                    print(f"🔍 [RMPAD] logits_rmpad after temp scaling (temp={temperature:.6f}):")
+                    print(f"  min={logits_rmpad.min().item():.6f}, max={logits_rmpad.max().item():.6f}, mean={logits_rmpad.mean().item():.6f}")
+                    
+                    print(f"🔍 [RMPAD] input_ids_rmpad_rolled (labels):")
+                    print(f"  shape={input_ids_rmpad_rolled.shape}, min={input_ids_rmpad_rolled.min().item()}, max={input_ids_rmpad_rolled.max().item()}, mean={input_ids_rmpad_rolled.float().mean().item():.2f}")
 
                     # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
                     inplace_backward = True
                     if calculate_entropy:
                         inplace_backward = False
+                    print(f"🔍 [RMPAD] Calling logprobs_from_logits with inplace_backward={inplace_backward}")
+                    
                     log_probs = logprobs_from_logits(
                         logits=logits_rmpad,
                         labels=input_ids_rmpad_rolled,
                         inplace_backward=inplace_backward,
                     )
+                    
+                    print(f"🔍 [RMPAD] log_probs result:")
+                    print(f"  shape={log_probs.shape}, min={log_probs.min().item():.6f}, max={log_probs.max().item():.6f}, mean={log_probs.mean().item():.6f}")
 
                     # compute entropy
                     if calculate_entropy:
                         entropy_rmpad = self.compute_entropy_from_logits(logits_rmpad)  # ((total_nnz / sp) + pad)
+                        print(f"🔍 [RMPAD] entropy_rmpad: min={entropy_rmpad.min().item():.6f}, max={entropy_rmpad.max().item():.6f}, mean={entropy_rmpad.mean().item():.6f}")
 
                 # gather log_prob if sp > 1
                 if self.use_ulysses_sp:
@@ -282,7 +310,7 @@ class DataParallelPPOActor(BasePPOActor):
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
         if has_multi_modal_inputs:
-            num_micro_batches = data.batch.batch_size[0] // micro_batch_size
+            num_micro_batches =     data.batch.batch_size[0] // micro_batch_size
             non_tensor_select_keys = ["multi_modal_inputs"]
             micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
         elif use_dynamic_bsz:
@@ -294,15 +322,163 @@ class DataParallelPPOActor(BasePPOActor):
 
         log_probs_lst = []
         entropy_lst = []
-        for micro_batch in micro_batches:
+        mb_input_ids_lst = []
+        mb_position_ids_lst = []
+        mb_attention_mask_lst = []
+        mb_responses_lst = []
+        
+        for mb_idx, micro_batch in enumerate(micro_batches):
             if isinstance(micro_batch, DataProto):
                 micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            
+            # Log micro-batch size
+            batch_size = micro_batch['input_ids'].shape[0]
+            seq_len = micro_batch['input_ids'].shape[1]
+            print(f"\n🔍 [MB{mb_idx}] Size: batch_size={batch_size}, seq_len={seq_len}")
+            
+            # Decode first micro-batch for inspection
+            if mb_idx == 0 and self.tokenizer is not None and batch_size > 0:
+                import os
+                import json
+                import time
+                import torch.distributed as dist
+                
+                # Build output as single string to avoid async interleaving
+                output_lines = []
+                output_lines.append("="*100)
+                output_lines.append(f"🔍 [MB0 DECODE] Decoding all {batch_size} samples in micro-batch 0:")
+                output_lines.append("="*100)
+                
+                # Get worker/rank info
+                rank = dist.get_rank() if dist.is_initialized() else 0
+                world_size = dist.get_world_size() if dist.is_initialized() else 1
+                
+                # Loop through all samples in first micro-batch
+                for sample_idx in range(batch_size):
+                    output_lines.append("")
+                    output_lines.append("─"*100)
+                    output_lines.append(f"SAMPLE {sample_idx}/{batch_size-1}")
+                    output_lines.append("─"*100)
+                    
+                    sample_input_ids = micro_batch['input_ids'][sample_idx]
+                    sample_responses = micro_batch['responses'][sample_idx]
+                    sample_attn_mask = micro_batch['attention_mask'][sample_idx]
+                    
+                    # Find prompt vs response split
+                    response_len = sample_responses.shape[0]
+                    prompt_len = seq_len - response_len
+                    
+                    output_lines.append(f"📊 Lengths: total_seq={seq_len}, prompt={prompt_len}, response={response_len}")
+                    output_lines.append(f"📊 Attention: total_valid={sample_attn_mask.sum().item()}, ratio={sample_attn_mask.float().mean().item():.4f}")
+                    
+                    # Extract prompt (everything before response)
+                    prompt_ids = sample_input_ids[:prompt_len]
+                    prompt_attn = sample_attn_mask[:prompt_len]
+                    
+                    # Decode prompt (only non-padding)
+                    prompt_valid_mask = prompt_attn.bool()
+                    num_prompt_attended = prompt_valid_mask.sum().item()
+                    num_prompt_masked = (~prompt_valid_mask).sum().item()
+                    
+                    if prompt_valid_mask.any():
+                        prompt_valid_ids = prompt_ids[prompt_valid_mask]
+                        decoded_prompt = self.tokenizer.decode(prompt_valid_ids, skip_special_tokens=False)
+                        output_lines.append("")
+                        output_lines.append(f"📝 PROMPT ({num_prompt_attended} attended, {num_prompt_masked} masked/padding):")
+                        output_lines.append(decoded_prompt)
+                    else:
+                        output_lines.append("")
+                        output_lines.append(f"📝 PROMPT: (all padding)")
+                    
+                    # Decode response
+                    response_ids_from_input = sample_input_ids[prompt_len:prompt_len+response_len]
+                    response_attn = sample_attn_mask[prompt_len:prompt_len+response_len]
+                    response_valid_mask = response_attn.bool()
+                    num_response_attended = response_valid_mask.sum().item()
+                    num_response_masked = (~response_valid_mask).sum().item()
+                    
+                    if response_valid_mask.any():
+                        response_valid_ids = response_ids_from_input[response_valid_mask]
+                        decoded_response = self.tokenizer.decode(response_valid_ids, skip_special_tokens=False)
+                        output_lines.append("")
+                        output_lines.append(f"💬 RESPONSE from input_ids ({num_response_attended} attended, {num_response_masked} masked/padding):")
+                        output_lines.append(decoded_response)
+                    else:
+                        output_lines.append("")
+                        output_lines.append(f"💬 RESPONSE from input_ids: (all padding)")
+                    
+                    # Decode response from separate response tensor (should be same)
+                    response_valid_mask_2 = (sample_responses != self.tokenizer.pad_token_id)
+                    if response_valid_mask_2.any():
+                        response_valid_ids_2 = sample_responses[response_valid_mask_2]
+                        decoded_response_2 = self.tokenizer.decode(response_valid_ids_2, skip_special_tokens=False)
+                        output_lines.append("")
+                        output_lines.append(f"💬 RESPONSE from responses tensor ({response_valid_mask_2.sum().item()} attended, {(~response_valid_mask_2).sum().item()} masked/padding):")
+                    output_lines.append(decoded_response_2)
+                    
+                    # Show attention pattern summary
+                    total_attended = sample_attn_mask.sum().item()
+                    total_masked = seq_len - total_attended
+                    output_lines.append("")
+                    output_lines.append(f"🎭 ATTENTION SUMMARY:")
+                    output_lines.append(f"  Total sequence: {seq_len} tokens")
+                    output_lines.append(f"  Attended (attn=1): {total_attended} tokens ({100*total_attended/seq_len:.1f}%)")
+                    output_lines.append(f"  Masked (attn=0):   {total_masked} tokens ({100*total_masked/seq_len:.1f}%)")
+                    output_lines.append(f"  Breakdown:")
+                    output_lines.append(f"    - Prompt: {num_prompt_attended} attended, {num_prompt_masked} masked")
+                    output_lines.append(f"    - Response: {num_response_attended} attended, {num_response_masked} masked")
+                    
+                    # Show first/last attended positions
+                    attended_positions = sample_attn_mask.nonzero(as_tuple=True)[0]
+                    if len(attended_positions) > 0:
+                        first_attended = attended_positions[0].item()
+                        last_attended = attended_positions[-1].item()
+                        output_lines.append(f"  First attended position: {first_attended}")
+                        output_lines.append(f"  Last attended position: {last_attended}")
+                        output_lines.append(f"  Attended span: [{first_attended}:{last_attended}] ({last_attended - first_attended + 1} positions)")
+                
+                output_lines.append("")
+                output_lines.append("="*100)
+                
+                # Write to JSON file
+                # output_text = "\n".join(output_lines)
+                # output_data = {
+                #     "timestamp": time.strftime("%Y%m%d_%H%M%S"),
+                #     "rank": rank,
+                #     "world_size": world_size,
+                #     "batch_size": batch_size,
+                #     "seq_len": seq_len,
+                #     "output": output_text
+                # }
+                
+                # Save to file
+                # if hasattr(data.meta_info, 'get') and 'global_step' in data.meta_info:
+                #     step = data.meta_info['global_step']
+                # else:
+                #     step = "unknown"
+                
+                # output_dir = "/tmp/mb0_decode_logs"
+                # os.makedirs(output_dir, exist_ok=True)
+                # output_file = os.path.join(output_dir, f"mb0_decode_rank{rank}_step{step}_{time.strftime('%Y%m%d_%H%M%S')}.json")
+                
+                # with open(output_file, 'w') as f:
+                #     json.dump(output_data, f, indent=2)
+                
+                # Print as single block to avoid interleaving
+                # print(f"\n💾 Saved MB0 decode to: {output_file}")
+                # print(output_text)
+            
+            # Collect micro-batch input stats
+            mb_input_ids_lst.append(micro_batch['input_ids'])
+            mb_position_ids_lst.append(micro_batch['position_ids'])
+            mb_attention_mask_lst.append(micro_batch['attention_mask'])
+            mb_responses_lst.append(micro_batch['responses'])
+            
             with torch.no_grad():
                 entropy, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature, calculate_entropy=calculate_entropy)
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
-
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
         if calculate_entropy:
@@ -313,6 +489,43 @@ class DataParallelPPOActor(BasePPOActor):
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
 
+        # Micro-batch level stats (as arrays)
+        print(f"\n📊 [MB_MIN] input_ids: {[mb.min().item() for mb in mb_input_ids_lst]}")
+        print(f"📊 [MB_MEAN] input_ids: {[mb.float().mean().item() for mb in mb_input_ids_lst]}")
+        print(f"📊 [MB_MAX] input_ids: {[mb.max().item() for mb in mb_input_ids_lst]}")
+        
+        print(f"📊 [MB_MIN] position_ids: {[mb.min().item() for mb in mb_position_ids_lst]}")
+        print(f"📊 [MB_MEAN] position_ids: {[mb.float().mean().item() for mb in mb_position_ids_lst]}")
+        print(f"📊 [MB_MAX] position_ids: {[mb.max().item() for mb in mb_position_ids_lst]}")
+        
+        print(f"📊 [MB_MIN] attention_mask: {[mb.min().item() for mb in mb_attention_mask_lst]}")
+        print(f"📊 [MB_MEAN] attention_mask: {[mb.float().mean().item() for mb in mb_attention_mask_lst]}")
+        print(f"📊 [MB_MAX] attention_mask: {[mb.max().item() for mb in mb_attention_mask_lst]}")
+        print(f"📊 [MB_SUM] attention_mask: {[mb.sum().item() for mb in mb_attention_mask_lst]}")
+        
+        print(f"📊 [MB_MIN] responses: {[mb.min().item() for mb in mb_responses_lst]}")
+        print(f"📊 [MB_MEAN] responses: {[mb.float().mean().item() for mb in mb_responses_lst]}")
+        print(f"📊 [MB_MAX] responses: {[mb.max().item() for mb in mb_responses_lst]}")
+        
+        print(f"📊 [MB_MIN] log_probs: {[lp.min().item() for lp in log_probs_lst]}")
+        print(f"📊 [MB MEAN] log_probs: {[lp.mean().item() for lp in log_probs_lst]}")
+        print(f"📊 [MB_MAX] log_probs: {[lp.max().item() for lp in log_probs_lst]}")
+
+        print(f"📊 [MB_MIN] entropy: {[e.min().item() for e in entropy_lst]}")
+        print(f"📊 [MB_MEAN] entropy: {[e.mean().item() for e in entropy_lst]}")
+        print(f"📊 [MB_MAX] entropy: {[e.max().item() for e in entropy_lst]}")
+
+        print(f"📊 [GLOBAL] log_probs: min={log_probs.min().item():.8f}, mean={log_probs.mean().item():.8f}, max={log_probs.max().item():.8f}")
+        print(f"📊 [GLOBAL] entropy: min={entropys.min().item():.8f}, mean={entropys.mean().item():.8f}, max={entropys.max().item():.8f}")
+
+        first_param = next(self.actor_module.parameters())
+        print(f"🔑 [WEIGHTS] mean={first_param.mean().item():.10f}, std={first_param.std().item():.10f}")
+        
+        # 2. Config check
+        temperature = data.meta_info["temperature"]
+        micro_batch_size = data.meta_info["micro_batch_size"]
+        print(f"⚙️ [CONFIG] temp={temperature:.6f}, micro_bsz={micro_batch_size}, training={self.actor_module.training}")
+        
         return log_probs, entropys
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
@@ -517,29 +730,78 @@ class DataParallelPPOActor(BasePPOActor):
 
                 grad_norm = self._optimizer_step()
 
-                # 🔍 LOG: Weight mean AFTER optimizer step
-                import traceback
-                print("🔍 CALLSTACK (update_actor):\n" + "".join(traceback.format_stack(limit=600)))
-
-                post_mean = first_param.data.mean().item()
-                print(f"🔍 FSDP UPDATE: pre_mean={pre_mean} post_mean={post_mean} Δ={post_mean-pre_mean}")
                 
-                                # 🔍 LOG: FSDP weights AFTER training - print mean of EVERY param (verbose!)
-                print("🔍 FSDP TRAINED: layer-wise means")
-                for name, param in self.actor_module.named_parameters():
-                    try:
-                        mean_val = param.data.mean().item()
-                    except Exception:
-                        mean_val = float('nan')
-                    print(f"   {name:60s} | mean={mean_val}")
                 
-                # 🔍 VERIFY: Compute global mean of ALL params after training
-                global_sum, global_cnt = 0.0, 0
-                for p in self.actor_module.parameters():
-                    global_sum += p.data.float().sum().item()
-                    global_cnt += p.numel()
-                global_mean = global_sum / global_cnt if global_cnt else 0.0
-                print(f"🔍 FSDP_GLOBAL_MEAN: {global_mean}")
+                # 🔍 GRADIENT INSPECTION (print every 10 mini-batches)
+                # This runs AFTER optimizer step, BEFORE zero_grad
+                if not hasattr(self, '_grad_step_counter'):
+                    self._grad_step_counter = 0
+                self._grad_step_counter += 1
+                
+                if self._grad_step_counter % 2 == 0:
+                    import torch.distributed as dist
+                    rank = dist.get_rank() if dist.is_initialized() else 0
+                    world_size = dist.get_world_size() if dist.is_initialized() else 1
+                    
+                    # ALL workers print to compare gradients across ranks
+                    # Build output as single string
+                    output = []
+                    output.append(f"\n{'='*80}")
+                    output.append(f"🔍 GRADIENT INSPECTION (mini-batch {self._grad_step_counter}) [Rank {rank}/{world_size}]")
+                    output.append(f"{'='*80}\n")
+                    
+                    # Print ALL parameters from named_parameters()
+                    output.append(f"📦 ALL PARAMETERS (via named_parameters()):\n")
+                    param_count = 0
+                    params_with_grad = 0
+                    
+                    # Aggregate statistics across all parameters
+                    all_grad_norms = []
+                    all_grad_means = []
+                    all_grad_stds = []
+                    all_grad_mins = []
+                    all_grad_maxs = []
+                    
+                    for name, param in self.actor_module.named_parameters():
+                        param_count += 1
+                        has_grad = param.grad is not None
+                        
+                        if has_grad:
+                            params_with_grad += 1
+                            g_norm = param.grad.norm().item()
+                            g_mean = param.grad.mean().item()
+                            g_std = param.grad.std().item()
+                            g_min = param.grad.min().item()
+                            g_max = param.grad.max().item()
+                            
+                            # Collect for aggregate stats
+                            all_grad_norms.append(g_norm)
+                            all_grad_means.append(g_mean)
+                            all_grad_stds.append(g_std)
+                            all_grad_mins.append(g_min)
+                            all_grad_maxs.append(g_max)
+                            
+                            grad_str = f"GRAD: norm={g_norm:.6f} mean={g_mean:.10f} std={g_std:.6f} range=[{g_min:.6f}, {g_max:.6f}]"
+                        else:
+                            grad_str = "GRAD: None"
+                        
+                        output.append(f"[{param_count}] {name}")
+                        output.append(f"    shape={tuple(param.shape)}, dtype={param.dtype}, requires_grad={param.requires_grad}")
+                        output.append(f"    {grad_str}\n")
+                    
+                    output.append(f"{'─'*80}")
+                    
+                    import numpy as np
+                    avg_norm = np.mean(all_grad_norms)
+                    avg_mean = np.mean(all_grad_means)
+                    avg_std = np.mean(all_grad_stds)
+                    global_min = np.min(all_grad_mins)
+                    global_max = np.max(all_grad_maxs)
+                    output.append(f"SUMMARY [Rank {rank}]: {params_with_grad}/{param_count} params | AvgNorm={avg_norm:.8f} AvgMean={avg_mean:.10f} AvgStd={avg_std:.8f} GlobalMin={global_min:.8f} GlobalMax={global_max:.8f}")
+                    
+                    output.append(f"{'='*80}\n")
+                    # Print all at once
+                    print("\n".join(output))
 
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)

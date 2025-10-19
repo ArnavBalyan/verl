@@ -69,6 +69,7 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
         Tensor: Log-probabilities of the target labels, shape logits.shape[:-1].
     """
     if FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE:
+        print("FLAH_ATTN_CROSS_ENTROPY_LOSS_AVAILABLE is available")
         batch_dim = logits.shape[:-1]
         last_dim = logits.shape[-1]
         logits = logits.reshape(-1, last_dim)
@@ -81,9 +82,23 @@ def logprobs_from_logits(logits, labels, inplace_backward=True):
 
 
 def logprobs_from_logits_flash_attn(logits, labels, inplace_backward=True):
+    print(f"\n🔍 [logprobs_from_logits_flash_attn] Input:")
+    print(f"  logits: shape={logits.shape}, dtype={logits.dtype}, min={logits.min().item():.6f}, max={logits.max().item():.6f}, mean={logits.mean().item():.6f}")
+    print(f"  labels: shape={labels.shape}, dtype={labels.dtype}, min={labels.min().item()}, max={labels.max().item()}, mean={labels.float().mean().item():.2f}")
+    print(f"  inplace_backward={inplace_backward}")
+    
     output = cross_entropy_loss(logits, labels, inplace_backward=inplace_backward)
     assert isinstance(output, tuple), "please make sure flash-attn>=2.4.3 where cross_entropy_loss returns Tuple[losses, z_losses]."
-    return -output[0]
+    
+    losses = output[0]
+    z_losses = output[1]
+    print(f"  cross_entropy losses: shape={losses.shape}, min={losses.min().item():.6f}, max={losses.max().item():.6f}, mean={losses.mean().item():.6f}")
+    print(f"  cross_entropy z_losses: shape={z_losses.shape}, min={z_losses.min().item():.6f}, max={z_losses.max().item():.6f}, mean={z_losses.mean().item():.6f}")
+    
+    log_probs = -losses
+    print(f"  log_probs (result): shape={log_probs.shape}, min={log_probs.min().item():.6f}, max={log_probs.max().item():.6f}, mean={log_probs.mean().item():.6f}")
+    
+    return log_probs
 
 
 def logprobs_from_logits_naive(logits, labels):
@@ -96,12 +111,22 @@ def logprobs_from_logits_v2(logits: torch.FloatTensor, labels):
     """
     A memory efficient implementation of logprobs_from_logits
     """
+    print(f"\n🔍 [logprobs_from_logits_v2] Input:")
+    print(f"  logits: shape={logits.shape}, dtype={logits.dtype}, min={logits.min().item():.6f}, max={logits.max().item():.6f}, mean={logits.mean().item():.6f}")
+    print(f"  labels: shape={labels.shape}, dtype={labels.dtype}, min={labels.min().item()}, max={labels.max().item()}, mean={labels.float().mean().item():.2f}")
+    
     if logits.dtype in [torch.float32, torch.float64]:
+        print(f"  Using float32/64 path (logsumexp)")
         logits_labels = torch.gather(logits, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+        print(f"  logits_labels (gathered): min={logits_labels.min().item():.6f}, max={logits_labels.max().item():.6f}, mean={logits_labels.mean().item():.6f}")
+        
         # loop to reduce peak mem consumption
         logsumexp_values = torch.stack([torch.logsumexp(logit, dim=-1) for logit in logits])
+        print(f"  logsumexp_values: min={logsumexp_values.min().item():.6f}, max={logsumexp_values.max().item():.6f}, mean={logsumexp_values.mean().item():.6f}")
+        
         logprobs_labels = logits_labels - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
     else:
+        print(f"  Using bfloat16 path (log_softmax)")
         # logsumexp approach is unstable with bfloat16, fall back to slightly less efficent approach
         logprobs_labels = []
         for row_logits, row_labels in zip(logits, labels):  # loop to reduce peak mem consumption
@@ -109,6 +134,8 @@ def logprobs_from_logits_v2(logits: torch.FloatTensor, labels):
             row_logprobs_labels = row_logprobs.gather(dim=-1, index=row_labels.unsqueeze(-1)).squeeze(-1)
             logprobs_labels.append(row_logprobs_labels)
         logprobs_labels = torch.stack(logprobs_labels)
+    
+    print(f"  logprobs_labels (result): shape={logprobs_labels.shape}, min={logprobs_labels.min().item():.6f}, max={logprobs_labels.max().item():.6f}, mean={logprobs_labels.mean().item():.6f}")
     return logprobs_labels
 
 

@@ -334,6 +334,7 @@ class AsyncLLMServerManager:
         unready_dp_ranks = set(range(self.rollout_dp_size))
         while len(unready_dp_ranks) > 0:
             agent_id = self.scheduler_kwargs.get('agent_id') if self.scheduler_kwargs else None
+            print("[arnavb] spinning up vllm servers " + str(unready_dp_ranks) + " " + str(self.rollout_tp_size), " ", str(workers_info), " ", agent_id, " ", str(self.worker_group.name_prefix))
             servers = {
                 rollout_dp_rank: server_class.options(
                     # make sure AsyncvLLMServer colocates with its corresponding workers
