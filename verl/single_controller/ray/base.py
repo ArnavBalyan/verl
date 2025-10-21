@@ -758,6 +758,7 @@ def create_colocated_worker_cls(class_dict: dict[str, RayClassWithInitArgs]):
     """
     cls_dict = {}
     init_args_dict = {}
+    print("Printing class_dict: ", class_dict)
     worker_cls = _determine_fsdp_megatron_base_class(
         [cls.cls.__ray_actor_class__.__mro__ for cls in class_dict.values()]
     )

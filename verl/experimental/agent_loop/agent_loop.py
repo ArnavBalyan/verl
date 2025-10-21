@@ -28,6 +28,7 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
 from tensordict import TensorDict
 from transformers import AutoTokenizer
+import uuid
 
 from verl.protocol import DataProto
 from verl.single_controller.ray.base import RayWorkerGroup
@@ -429,6 +430,7 @@ class AgentLoopManager:
     def _initialize_llm_servers(self):
         self.rollout_tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
         self.rollout_dp_size = self.worker_group.world_size // self.rollout_tp_size
+        print("Printing self.worker_group.world_size: ", self.worker_group.world_size)
 
         register_center = ray.get_actor(f"{self.worker_group.name_prefix}_register_center")
         workers_info = ray.get(register_center.get_worker_info.remote())
@@ -456,7 +458,8 @@ class AgentLoopManager:
                         node_id=workers_info[rollout_dp_rank * self.rollout_tp_size],
                         soft=False,
                     ),
-                    name=f"async_llm_server_{rollout_dp_rank}",
+                    # name=f"async_llm_server_{rollout_dp_rank}",
+                    name=f"async_llm_server_{rollout_dp_rank}_{uuid.uuid4().hex[:6]}",
                 ).remote(self.config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix)
                 for rollout_dp_rank in unready_dp_ranks
             }
@@ -479,9 +482,10 @@ class AgentLoopManager:
         for i in range(self.config.actor_rollout_ref.rollout.agent.num_workers):
             self.agent_loop_workers.append(
                 AgentLoopWorker.options(
-                    name=f"agent_loop_worker_{i}",
+                    name=f"agent_loop_worker_{i}_{uuid.uuid4().hex[:6]}",
                 ).remote(self.config, self.async_llm_servers)
             )
+        print(f"Created {len(self.agent_loop_workers)} agent loop workers with prefix: {self.worker_group.name_prefix}")
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         """Split input batch and dispatch to agent loop workers.

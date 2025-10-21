@@ -134,6 +134,7 @@ class AsyncLLMServerManager:
 
         self.rollout_tp_size = self.config.rollout.tensor_model_parallel_size
         self.rollout_dp_size = self.worker_group.world_size // self.rollout_tp_size
+        print("Printing self.worker_group.world_size: ", self.worker_group.world_size)
 
         register_center = ray.get_actor(f"{self.worker_group.name_prefix}_register_center")
         workers_info = ray.get(register_center.get_worker_info.remote())
@@ -153,6 +154,7 @@ class AsyncLLMServerManager:
 
         # Start all server instances, restart if address already in use.
         unready_dp_ranks = set(range(self.rollout_dp_size))
+        import uuid
         while len(unready_dp_ranks) > 0:
             servers = {
                 rollout_dp_rank: server_class.options(
@@ -161,7 +163,8 @@ class AsyncLLMServerManager:
                         node_id=workers_info[rollout_dp_rank * self.rollout_tp_size],
                         soft=False,
                     ),
-                    name=f"async_llm_server_{rollout_dp_rank}",
+                    # name=f"async_llm_server_{rollout_dp_rank}",
+                    name=f"async_llm_server_{rollout_dp_rank}_{uuid.uuid4().hex[:6]}",
                 ).remote(config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix)
                 for rollout_dp_rank in unready_dp_ranks
             }
