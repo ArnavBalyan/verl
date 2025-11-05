@@ -411,15 +411,17 @@ async def get_trajectory_info(step, index, validate):
 class AgentLoopManager:
     """Agent loop manager that manages a group of agent loop workers."""
 
-    def __init__(self, config: DictConfig, worker_group: RayWorkerGroup):
+    def __init__(self, config: DictConfig, worker_group: RayWorkerGroup, engine_id: int):
         """Initialize agent loop manager.
 
         Args:
             config (DictConfig): trainer config.
             worker_group (RayWorkerGroup): ActorRolloutRef worker group.
+            engine_id (int): Engine ID for extracting per-engine config.
         """
         self.config = config
         self.worker_group = worker_group
+        self.engine_id = engine_id
 
         self._initialize_llm_servers()
         self._init_agent_loop_workers()
@@ -430,7 +432,12 @@ class AgentLoopManager:
     def _initialize_llm_servers(self):
         self.rollout_tp_size = self.config.actor_rollout_ref.rollout.tensor_model_parallel_size
         self.rollout_dp_size = self.worker_group.world_size // self.rollout_tp_size
-        print("Printing self.worker_group.world_size: ", self.worker_group.world_size)
+
+        # Extract per-engine response_length from list
+        response_length = self.config.actor_rollout_ref.rollout.response_length
+        self.config = OmegaConf.to_container(self.config, resolve=True)
+        self.config = OmegaConf.create(self.config)
+        self.config.actor_rollout_ref.rollout.response_length = response_length[self.engine_id]
 
         register_center = ray.get_actor(f"{self.worker_group.name_prefix}_register_center")
         workers_info = ray.get(register_center.get_worker_info.remote())

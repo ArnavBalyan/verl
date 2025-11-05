@@ -922,9 +922,11 @@ class RayPPOTrainer:
             from verl.experimental.agent_loop import AgentLoopManager
 
             self.async_rollout_mode = True
+            # Pass engine_id for per-engine response_length
             self.async_rollout_manager = AgentLoopManager(
                 config=self.config,
                 worker_group=self.actor_rollout_wg,
+                engine_id=self.engine_id,
             )
 
     def _save_checkpoint(self):
